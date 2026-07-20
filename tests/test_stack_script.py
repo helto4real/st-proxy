@@ -1,0 +1,381 @@
+from __future__ import annotations
+
+import os
+import shutil
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+STACK_SCRIPT = REPO_ROOT / "st-stack.zsh"
+
+
+def _write_executable(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
+class FakeStack:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.home = root / "home"
+        self.repo = root / "st-proxy"
+        self.outside = root / "outside"
+        self.runtime = root / "runtime"
+        self.events = root / "events.log"
+        self.curl_log = root / "curl.log"
+        self.bin_dir = root / "bin"
+
+        self.cobol_dir = self.home / "git" / "cobolcpp"
+        self.silly_dir = self.home / "git" / "SillyTavern"
+        self.alltalk_dir = self.home / "git" / "alltalk_tts"
+        self.alltalk_command = (
+            self.home / ".dotfiles" / "config" / "dotconfig" / "scripts" / "start_all_talk.sh"
+        )
+
+        for directory in (self.repo, self.outside, self.runtime, self.bin_dir):
+            directory.mkdir(parents=True)
+
+        self.script = self.repo / "st-stack.zsh"
+        shutil.copy2(STACK_SCRIPT, self.script)
+        self.script.chmod(0o755)
+
+        self._create_services()
+        self.env = os.environ.copy()
+        self.env.update(
+            {
+                "HOME": str(self.home),
+                "PATH": f"{self.bin_dir}:{self.env['PATH']}",
+                "STACK_EVENT_LOG": str(self.events),
+                "STACK_CURL_LOG": str(self.curl_log),
+                "ST_STACK_ALLTALK_PORT": "7851",
+                "ST_STACK_START_TIMEOUT": "3",
+                "ST_STACK_STOP_TIMEOUT": "2",
+                "XDG_RUNTIME_DIR": str(self.runtime),
+            }
+        )
+
+    def _create_services(self) -> None:
+        def shell_service(service: str) -> str:
+            return f"""#!/bin/sh
+set -eu
+printf '%s|%s|%s\\n' "{service}" "$PWD" "$$" >> "$STACK_EVENT_LOG"
+printf '%s-child-log\\n' "{service}"
+trap 'exit 0' INT TERM HUP
+while :; do sleep 1; done
+"""
+
+        _write_executable(self.cobol_dir / "start_HQ.sh", shell_service("cobol"))
+
+        _write_executable(self.silly_dir / "start.sh", shell_service("silly"))
+
+        _write_executable(self.alltalk_command, shell_service("alltalk"))
+        self.alltalk_dir.mkdir(parents=True)
+
+        _write_executable(
+            self.repo / ".venv" / "bin" / "st-vram-proxy", shell_service("proxy")
+        )
+
+        fake_fuser = """#!/bin/sh
+set -eu
+pid=${FAKE_PORT_OWNER_PID:-}
+port=${FAKE_PORT_OWNER_PORT:-}
+if [ -z "$pid" ] || [ "${3:-}" != "$port" ]; then
+    exit 1
+fi
+state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+case "$state" in
+    ''|Z*) exit 1 ;;
+esac
+printf '%s\\n' "$pid"
+"""
+        _write_executable(self.bin_dir / "fuser", fake_fuser)
+
+        fake_curl = """#!/bin/sh
+set -eu
+url=
+for argument in "$@"; do url=$argument; done
+printf '%s\\n' "$url" >> "$STACK_CURL_LOG"
+
+service_alive() {
+    service=$1
+    [ -f "$STACK_EVENT_LOG" ] || return 1
+    pid=$(awk -F '|' -v service="$service" \
+        '$1 == service { pid = $3 } END { print pid }' "$STACK_EVENT_LOG")
+    [ -n "$pid" ] || return 1
+    state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$state" in
+        ''|Z*) return 1 ;;
+    esac
+}
+
+case "$url" in
+    */api/ready)
+        ready_file=${FAKE_ALLTALK_READY_FILE:-}
+        if [ -n "$ready_file" ]; then
+            [ -e "$ready_file" ] || exit 1
+        else
+            service_alive alltalk || exit 1
+        fi
+        printf 'Ready'
+        ;;
+    *)
+        ready_file=${FAKE_KOBOLD_READY_FILE:-}
+        if [ -n "$ready_file" ]; then
+            [ -e "$ready_file" ]
+        else
+            service_alive cobol
+        fi
+        ;;
+esac
+"""
+        _write_executable(self.bin_dir / "curl", fake_curl)
+
+    def start(self, *args: str) -> subprocess.Popen[str]:
+        return subprocess.Popen(
+            ["zsh", str(self.script), *args],
+            cwd=self.outside,
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+    def read_events(self) -> list[tuple[str, Path, int]]:
+        if not self.events.exists():
+            return []
+        events = []
+        for line in self.events.read_text(encoding="utf-8").splitlines():
+            service, cwd, pid = line.split("|", maxsplit=2)
+            events.append((service, Path(cwd), int(pid)))
+        return events
+
+    def wait_for_services(
+        self, process: subprocess.Popen[str], expected: set[str], timeout: float = 8
+    ) -> list[tuple[str, Path, int]]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            events = self.read_events()
+            if expected <= {event[0] for event in events}:
+                return events
+            if process.poll() is not None:
+                output = process.communicate()[0]
+                pytest.fail(f"stack exited before services started:\n{output}")
+            time.sleep(0.05)
+        pytest.fail(f"timed out waiting for {sorted(expected)}; events={self.read_events()}")
+
+
+@pytest.fixture
+def fake_stack(tmp_path: Path) -> FakeStack:
+    return FakeStack(tmp_path)
+
+
+@pytest.mark.parametrize("show_logs", [False, True])
+def test_start_order_working_directories_and_logging(
+    fake_stack: FakeStack, show_logs: bool
+) -> None:
+    process = fake_stack.start(*(("--log",) if show_logs else ()))
+    events = fake_stack.wait_for_services(process, {"cobol", "silly", "alltalk", "proxy"})
+
+    proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
+    proxy_command = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    readiness_requests = fake_stack.curl_log.read_text(encoding="utf-8").splitlines()
+
+    process.send_signal(signal.SIGINT)
+    output = process.communicate(timeout=12)[0]
+
+    assert process.returncode == 130
+    first_event = {service: (index, cwd) for index, (service, cwd, _pid) in enumerate(events)}
+    assert first_event["cobol"][1] == fake_stack.cobol_dir
+    assert first_event["silly"][1] == fake_stack.silly_dir
+    assert first_event["alltalk"][1] == fake_stack.alltalk_dir
+    assert first_event["proxy"][1] == fake_stack.repo
+    dependency_indexes = [first_event[name][0] for name in ("cobol", "silly", "alltalk")]
+    assert first_event["proxy"][0] > max(dependency_indexes)
+
+    assert "--kobold-url http://127.0.0.1:5001" in proxy_command
+    assert "--comfy-url http://127.0.0.1:8188" in proxy_command
+    assert "--chat-port 5002" in proxy_command
+    assert "--image-port 8189" in proxy_command
+
+    assert "http://127.0.0.1:5001/api/v1/info/version" in readiness_requests
+
+    assert "st-stack: starting CobolCpp" in output
+    assert "st-stack: starting SillyTavern" in output
+    assert "st-stack: starting AllTalk" in output
+    assert "proxy-child-log" in output
+    for child_log in ("cobol-child-log", "silly-child-log", "alltalk-child-log"):
+        assert (child_log in output) is show_logs
+
+
+def test_stop_flag_stops_the_supervised_stack(fake_stack: FakeStack) -> None:
+    supervisor = fake_stack.start()
+    fake_stack.wait_for_services(supervisor, {"cobol", "silly", "alltalk", "proxy"})
+
+    stopped = subprocess.run(
+        ["zsh", str(fake_stack.script), "--stop"],
+        cwd=fake_stack.outside,
+        env=fake_stack.env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    supervisor_output = supervisor.communicate(timeout=12)[0]
+
+    assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+    assert supervisor.returncode == 143, supervisor_output
+    assert "requesting stack shutdown" in stopped.stderr
+
+
+def test_existing_dependencies_are_reused_and_stopped(fake_stack: FakeStack) -> None:
+    external = [
+        subprocess.Popen(
+            [str(fake_stack.cobol_dir / "start_HQ.sh")],
+            cwd=fake_stack.cobol_dir,
+            env=fake_stack.env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        ),
+        subprocess.Popen(
+            [str(fake_stack.silly_dir / "start.sh")],
+            cwd=fake_stack.silly_dir,
+            env=fake_stack.env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        ),
+        subprocess.Popen(
+            [str(fake_stack.alltalk_command)],
+            cwd=fake_stack.alltalk_dir,
+            env=fake_stack.env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        ),
+    ]
+
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if {"cobol", "silly", "alltalk"} <= {
+                service for service, _cwd, _pid in fake_stack.read_events()
+            }:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("external dependency mocks did not start")
+
+        supervisor = fake_stack.start()
+        fake_stack.wait_for_services(supervisor, {"cobol", "silly", "alltalk", "proxy"})
+        supervisor.send_signal(signal.SIGINT)
+        output = supervisor.communicate(timeout=12)[0]
+
+        assert supervisor.returncode == 130
+        assert "CobolCpp is already reachable" in output
+        assert "silly is already running in its expected directory" in output
+        assert "AllTalk is already ready on port 7851" in output
+        event_names = [service for service, _cwd, _pid in fake_stack.read_events()]
+        assert event_names.count("cobol") == 1
+        assert event_names.count("silly") == 1
+        assert event_names.count("alltalk") == 1
+        for process in external:
+            process.wait(timeout=5)
+    finally:
+        for process in external:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+
+
+def test_dependency_timeout_prevents_proxy_start(fake_stack: FakeStack) -> None:
+    _write_executable(fake_stack.alltalk_command, "#!/bin/sh\nexit 1\n")
+    fake_stack.env["ST_STACK_START_TIMEOUT"] = "1"
+
+    process = fake_stack.start()
+    output = process.communicate(timeout=10)[0]
+
+    assert process.returncode == 1
+    assert "timed out waiting for dependencies: alltalk" in output
+    assert "proxy" not in {service for service, _cwd, _pid in fake_stack.read_events()}
+
+
+def test_proxy_port_owner_is_stopped_before_proxy_start(fake_stack: FakeStack) -> None:
+    owner = subprocess.Popen(["sleep", "300"], start_new_session=True)
+    fake_stack.env.update(
+        {
+            "FAKE_PORT_OWNER_PID": str(owner.pid),
+            "FAKE_PORT_OWNER_PORT": "8189",
+        }
+    )
+
+    try:
+        supervisor = fake_stack.start()
+        fake_stack.wait_for_services(supervisor, {"cobol", "silly", "alltalk", "proxy"})
+        owner.wait(timeout=5)
+        supervisor.send_signal(signal.SIGINT)
+        output = supervisor.communicate(timeout=12)[0]
+
+        assert supervisor.returncode == 130
+        assert owner.returncode == -signal.SIGTERM
+        assert f"proxy port 8189 is owned by PID(s) {owner.pid}" in output
+        assert "proxy port 8189 is available" in output
+    finally:
+        if owner.poll() is None:
+            os.killpg(owner.pid, signal.SIGKILL)
+            owner.wait(timeout=5)
+
+
+def test_proxy_waits_for_kobold_http_readiness(fake_stack: FakeStack) -> None:
+    ready_file = fake_stack.root / "kobold-ready"
+    fake_stack.env["FAKE_KOBOLD_READY_FILE"] = str(ready_file)
+    supervisor = fake_stack.start()
+
+    try:
+        fake_stack.wait_for_services(supervisor, {"cobol", "silly", "alltalk"})
+        time.sleep(0.5)
+        assert "proxy" not in {
+            service for service, _cwd, _pid in fake_stack.read_events()
+        }
+
+        ready_file.touch()
+        fake_stack.wait_for_services(supervisor, {"cobol", "silly", "alltalk", "proxy"})
+        supervisor.send_signal(signal.SIGINT)
+        output = supervisor.communicate(timeout=12)[0]
+
+        assert supervisor.returncode == 130
+        assert "waiting for KoboldCpp readiness" in output
+    finally:
+        if supervisor.poll() is None:
+            supervisor.kill()
+            supervisor.communicate(timeout=5)
+
+
+def test_proxy_waits_for_alltalk_ready_response(fake_stack: FakeStack) -> None:
+    ready_file = fake_stack.root / "alltalk-ready"
+    fake_stack.env["FAKE_ALLTALK_READY_FILE"] = str(ready_file)
+    supervisor = fake_stack.start()
+
+    try:
+        fake_stack.wait_for_services(supervisor, {"cobol", "silly", "alltalk"})
+        time.sleep(0.5)
+        assert "proxy" not in {
+            service for service, _cwd, _pid in fake_stack.read_events()
+        }
+
+        ready_file.touch()
+        fake_stack.wait_for_services(supervisor, {"cobol", "silly", "alltalk", "proxy"})
+        supervisor.send_signal(signal.SIGINT)
+        output = supervisor.communicate(timeout=12)[0]
+
+        assert supervisor.returncode == 130
+        assert "waiting for AllTalk readiness" in output
+    finally:
+        if supervisor.poll() is None:
+            supervisor.kill()
+            supervisor.communicate(timeout=5)
