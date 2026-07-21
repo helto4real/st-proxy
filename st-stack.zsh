@@ -11,6 +11,7 @@ typeset -gr SCRIPT_DIR=${SCRIPT_PATH:h}
 typeset -gr COBOL_DIR="${HOME}/git/cobolcpp"
 typeset -gr COBOL_COMMAND="./start_HQ.sh"
 typeset -gr SILLY_DIR="${HOME}/git/SillyTavern"
+typeset -gr POCKETTTS_DIR="${HOME}/git/alltalk-pocket-tts-integraion"
 typeset -gr ALLTALK_DIR="${HOME}/git/alltalk_tts"
 typeset -gr ALLTALK_COMMAND="${HOME}/.dotfiles/config/dotconfig/scripts/start_all_talk.sh"
 typeset -gr PROXY_COMMAND="./.venv/bin/st-vram-proxy"
@@ -31,6 +32,7 @@ typeset -g STOP_TIMEOUT="${ST_STACK_STOP_TIMEOUT:-10}"
 typeset -g PROXY_CHAT_PORT="${ST_PROXY_CHAT_PORT:-5002}"
 typeset -g PROXY_IMAGE_PORT="${ST_PROXY_IMAGE_PORT:-8189}"
 typeset -g KOBOLD_PORT=""
+typeset -g POCKETTTS_PORT="${ST_STACK_POCKETTTS_PORT:-8008}"
 typeset -g ALLTALK_PORT="${ST_STACK_ALLTALK_PORT:-7851}"
 
 typeset -ga MATCHED_PIDS=()
@@ -87,6 +89,10 @@ parse_args() {
         log "ST_STACK_ALLTALK_PORT must be an integer between 1 and 65535"
         return 2
     fi
+    if [[ "${POCKETTTS_PORT}" != <-> ]] || (( POCKETTTS_PORT < 1 || POCKETTTS_PORT > 65535 )); then
+        log "ST_STACK_POCKETTTS_PORT must be an integer between 1 and 65535"
+        return 2
+    fi
     if [[ "${KOBOLD_URL}" =~ '^https?://[^/:]+:([0-9]+)(/.*)?$' ]]; then
         KOBOLD_PORT=${match[1]}
     fi
@@ -114,7 +120,9 @@ read_process_info() {
 
     [[ -r "/proc/${pid}/cmdline" ]] || return 1
     PROCESS_CWD=$(readlink -f -- "/proc/${pid}/cwd" 2>/dev/null) || return 1
-    PROCESS_COMMAND=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null) || return 1
+    PROCESS_COMMAND=$(
+        { tr '\0' ' ' < "/proc/${pid}/cmdline"; } 2>/dev/null
+    ) || return 1
     [[ -n "${PROCESS_COMMAND}" ]]
 }
 
@@ -138,6 +146,10 @@ process_matches_service() {
                 [[ "${command_lower}" == *start.sh* ||
                     ( "${command_lower}" == *python* && "${command_lower}" == *main.py* ) ||
                     ( "${command_lower}" == *node* && "${command_lower}" == *server.js* ) ]]
+            ;;
+        pockettts)
+            [[ "${PROCESS_CWD}" == "${POCKETTTS_DIR}" ]] &&
+                [[ "${command_lower}" == *pockettts-bridge* ]]
             ;;
         alltalk)
             [[ "${PROCESS_CWD}" == "${ALLTALK_DIR}" ]] &&
@@ -181,6 +193,13 @@ kobold_ready() {
     curl --silent --fail --output /dev/null \
         --connect-timeout 0.5 --max-time 1 \
         "${KOBOLD_URL%/}/api/v1/info/version" 2>/dev/null
+}
+
+pockettts_ready() {
+    command -v curl >/dev/null 2>&1 || return 1
+    curl --silent --fail --output /dev/null \
+        --connect-timeout 0.5 --max-time 1 \
+        "http://127.0.0.1:${POCKETTTS_PORT}/health" 2>/dev/null
 }
 
 alltalk_ready() {
@@ -348,6 +367,10 @@ ensure_service_started() {
         log "CobolCpp is already reachable at ${KOBOLD_URL}"
         return 0
     fi
+    if [[ "${service}" == pockettts ]] && pockettts_ready; then
+        log "PocketTTS bridge is already ready on port ${POCKETTTS_PORT}"
+        return 0
+    fi
     if [[ "${service}" == alltalk ]] && alltalk_ready; then
         log "AllTalk is already ready on port ${ALLTALK_PORT}"
         return 0
@@ -365,6 +388,11 @@ ensure_service_started() {
         silly)
             log "starting SillyTavern in ${SILLY_DIR}"
             launch_in_directory silly "${SILLY_DIR}" 1 ./start.sh
+            ;;
+        pockettts)
+            log "starting PocketTTS bridge in ${POCKETTTS_DIR}"
+            launch_in_directory pockettts "${POCKETTTS_DIR}" 1 \
+                uv run pockettts-bridge --config bridge.toml
             ;;
         alltalk)
             log "starting AllTalk in ${ALLTALK_DIR}"
@@ -385,6 +413,21 @@ ensure_service_started() {
     esac
 }
 
+wait_for_pockettts() {
+    local deadline=$(( SECONDS + START_TIMEOUT ))
+
+    while (( SECONDS < deadline )); do
+        if pockettts_ready; then
+            log "PocketTTS bridge is ready"
+            return 0
+        fi
+        sleep 0.2
+    done
+
+    log "timed out waiting for PocketTTS bridge on port ${POCKETTTS_PORT}"
+    return 1
+}
+
 wait_for_dependencies() {
     local deadline=$(( SECONDS + START_TIMEOUT ))
     local service
@@ -393,12 +436,13 @@ wait_for_dependencies() {
     while (( SECONDS < deadline )); do
         missing=()
         kobold_ready || missing+=(cobol)
+        pockettts_ready || missing+=(pockettts)
         alltalk_ready || missing+=(alltalk)
         for service in silly; do
             service_running "${service}" || missing+=("${service}")
         done
         if (( ${#missing} == 0 )); then
-            log "CobolCpp, SillyTavern and AllTalk are running"
+            log "CobolCpp, SillyTavern, PocketTTS bridge and AllTalk are running"
             return 0
         fi
         sleep 0.2
@@ -447,6 +491,9 @@ collect_service_targets() {
     case "${service}" in
         cobol)
             service_port=${KOBOLD_PORT}
+            ;;
+        pockettts)
+            service_port=${POCKETTTS_PORT}
             ;;
         alltalk)
             service_port=${ALLTALK_PORT}
@@ -547,6 +594,7 @@ cleanup() {
 
     stop_service proxy || result=1
     stop_service alltalk || result=1
+    stop_service pockettts || result=1
     stop_service silly || result=1
     stop_service cobol || result=1
 
@@ -610,7 +658,7 @@ stop_stack() {
         supervisor_pid=${REPLY}
         log "requesting stack shutdown from supervisor ${supervisor_pid}"
         kill -s TERM -- "${supervisor_pid}" 2>/dev/null || true
-        deadline=$(( SECONDS + (STOP_TIMEOUT * 4) + 5 ))
+        deadline=$(( SECONDS + (STOP_TIMEOUT * 5) + 5 ))
         while (( SECONDS < deadline )); do
             is_supervisor_pid "${supervisor_pid}" || return 0
             sleep 0.2
@@ -621,6 +669,7 @@ stop_stack() {
     CLEANUP_STARTED=0
     stop_service proxy || result=1
     stop_service alltalk || result=1
+    stop_service pockettts || result=1
     stop_service silly || result=1
     stop_service cobol || result=1
     rm -f -- "${SUPERVISOR_FILE}"
@@ -645,6 +694,10 @@ monitor_stack() {
         done
         if ! service_running cobol && ! kobold_ready; then
             log "CobolCpp is no longer running or reachable; stopping the stack"
+            return 1
+        fi
+        if ! service_running pockettts && ! pockettts_ready; then
+            log "PocketTTS bridge is no longer running or ready; stopping the stack"
             return 1
         fi
         if ! service_running alltalk && ! alltalk_ready; then
@@ -700,6 +753,9 @@ main() {
 
     ensure_service_started cobol || return 1
     ensure_service_started silly || return 1
+    ensure_service_started pockettts || return 1
+    log "waiting for PocketTTS bridge readiness at http://127.0.0.1:${POCKETTTS_PORT}/health"
+    wait_for_pockettts || return 1
     ensure_service_started alltalk || return 1
     log "waiting for KoboldCpp readiness at ${KOBOLD_URL}"
     log "waiting for AllTalk readiness at http://127.0.0.1:${ALLTALK_PORT}/api/ready"
