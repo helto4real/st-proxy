@@ -30,7 +30,7 @@ class FakeStack:
         self.curl_log = root / "curl.log"
         self.bin_dir = root / "bin"
 
-        self.cobol_dir = self.home / "git" / "cobolcpp"
+        self.llm_dir = self.home / "git" / "cobolcpp"
         self.silly_dir = self.home / "git" / "SillyTavern"
         self.pockettts_dir = self.home / "git" / "alltalk-pocket-tts-integraion"
         self.alltalk_dir = self.home / "git" / "alltalk_tts"
@@ -53,6 +53,10 @@ class FakeStack:
                 "PATH": f"{self.bin_dir}:{self.env['PATH']}",
                 "STACK_EVENT_LOG": str(self.events),
                 "STACK_CURL_LOG": str(self.curl_log),
+                "ST_PROXY_LLM_BACKEND": "koboldcpp",
+                "ST_PROXY_LLM_URL": "http://127.0.0.1:5001",
+                "ST_STACK_LLM_DIR": str(self.llm_dir),
+                "ST_STACK_LLM_COMMAND": "./start_HQ.sh",
                 "ST_STACK_ALLTALK_PORT": "7851",
                 "ST_STACK_POCKETTTS_PORT": "8008",
                 "ST_STACK_START_TIMEOUT": "3",
@@ -71,7 +75,7 @@ trap 'exit 0' INT TERM HUP
 while :; do sleep 1; done
 """
 
-        _write_executable(self.cobol_dir / "start_HQ.sh", shell_service("cobol"))
+        _write_executable(self.llm_dir / "start_HQ.sh", shell_service("llm"))
 
         _write_executable(self.silly_dir / "start.sh", shell_service("silly"))
 
@@ -81,9 +85,41 @@ while :; do sleep 1; done
         _write_executable(self.alltalk_command, shell_service("alltalk"))
         self.alltalk_dir.mkdir(parents=True)
 
-        _write_executable(
-            self.repo / ".venv" / "bin" / "st-vram-proxy", shell_service("proxy")
-        )
+        fake_proxy = """#!/bin/sh
+set -eu
+check_backend=0
+llm_url=
+previous=
+for argument in "$@"; do
+    if [ "$argument" = "--check-backend" ]; then
+        check_backend=1
+    elif [ "$previous" = "--llm-url" ]; then
+        llm_url=$argument
+    fi
+    previous=$argument
+done
+if [ "$check_backend" -eq 1 ]; then
+    printf '%s\\n' "$llm_url" >> "$STACK_CURL_LOG"
+    ready_file=${FAKE_LLM_READY_FILE:-}
+    if [ -n "$ready_file" ]; then
+        [ -e "$ready_file" ]
+        exit
+    fi
+    [ -f "$STACK_EVENT_LOG" ] || exit 1
+    pid=$(awk -F '|' '$1 == "llm" { pid = $3 } END { print pid }' "$STACK_EVENT_LOG")
+    [ -n "$pid" ] || exit 1
+    state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$state" in
+        ''|Z*) exit 1 ;;
+    esac
+    exit 0
+fi
+printf '%s|%s|%s\\n' "proxy" "$PWD" "$$" >> "$STACK_EVENT_LOG"
+printf '%s-child-log\\n' "proxy"
+trap 'exit 0' INT TERM HUP
+while :; do sleep 1; done
+"""
+        _write_executable(self.repo / ".venv" / "bin" / "st-vram-proxy", fake_proxy)
 
         fake_fuser = """#!/bin/sh
 set -eu
@@ -119,6 +155,15 @@ service_alive() {
 }
 
 case "$url" in
+    */broker/status)
+        service_alive proxy || exit 1
+        unhealthy_file=${FAKE_BROKER_UNHEALTHY_FILE:-}
+        if [ -n "$unhealthy_file" ] && [ -e "$unhealthy_file" ]; then
+            printf '{"chat_available":false}'
+        else
+            printf '{"chat_available":true}'
+        fi
+        ;;
     */health)
         ready_file=${FAKE_POCKETTTS_READY_FILE:-}
         if [ -n "$ready_file" ]; then
@@ -141,7 +186,7 @@ case "$url" in
         if [ -n "$ready_file" ]; then
             [ -e "$ready_file" ]
         else
-            service_alive cobol
+            service_alive llm
         fi
         ;;
 esac
@@ -193,7 +238,7 @@ def test_start_order_working_directories_and_logging(
 ) -> None:
     process = fake_stack.start(*(("--log",) if show_logs else ()))
     events = fake_stack.wait_for_services(
-        process, {"cobol", "silly", "pockettts", "alltalk", "proxy"}
+        process, {"llm", "silly", "pockettts", "alltalk", "proxy"}
     )
 
     proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
@@ -205,32 +250,33 @@ def test_start_order_working_directories_and_logging(
 
     assert process.returncode == 130
     first_event = {service: (index, cwd) for index, (service, cwd, _pid) in enumerate(events)}
-    assert first_event["cobol"][1] == fake_stack.cobol_dir
+    assert first_event["llm"][1] == fake_stack.llm_dir
     assert first_event["silly"][1] == fake_stack.silly_dir
     assert first_event["pockettts"][1] == fake_stack.pockettts_dir
     assert first_event["alltalk"][1] == fake_stack.alltalk_dir
     assert first_event["proxy"][1] == fake_stack.repo
     dependency_indexes = [
-        first_event[name][0] for name in ("cobol", "silly", "pockettts", "alltalk")
+        first_event[name][0] for name in ("llm", "silly", "pockettts", "alltalk")
     ]
     assert first_event["proxy"][0] > max(dependency_indexes)
     assert first_event["pockettts"][0] < first_event["alltalk"][0]
 
-    assert "--kobold-url http://127.0.0.1:5001" in proxy_command
+    assert "--llm-backend koboldcpp" in proxy_command
+    assert "--llm-url http://127.0.0.1:5001" in proxy_command
     assert "--comfy-url http://127.0.0.1:8188" in proxy_command
     assert "--chat-port 5002" in proxy_command
     assert "--image-port 8189" in proxy_command
 
-    assert "http://127.0.0.1:5001/api/v1/info/version" in readiness_requests
+    assert "http://127.0.0.1:5001" in readiness_requests
     assert "http://127.0.0.1:8008/health" in readiness_requests
 
-    assert "st-stack: starting CobolCpp" in output
+    assert "st-stack: starting KoboldCpp" in output
     assert "st-stack: starting SillyTavern" in output
     assert "st-stack: starting PocketTTS bridge" in output
     assert "st-stack: starting AllTalk" in output
     assert "proxy-child-log" in output
     for child_log in (
-        "cobol-child-log",
+        "llm-child-log",
         "silly-child-log",
         "pockettts-child-log",
         "alltalk-child-log",
@@ -241,7 +287,7 @@ def test_start_order_working_directories_and_logging(
 def test_stop_flag_stops_the_supervised_stack(fake_stack: FakeStack) -> None:
     supervisor = fake_stack.start()
     fake_stack.wait_for_services(
-        supervisor, {"cobol", "silly", "pockettts", "alltalk", "proxy"}
+        supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
     )
 
     stopped = subprocess.run(
@@ -263,8 +309,8 @@ def test_stop_flag_stops_the_supervised_stack(fake_stack: FakeStack) -> None:
 def test_existing_dependencies_are_reused_and_stopped(fake_stack: FakeStack) -> None:
     external = [
         subprocess.Popen(
-            [str(fake_stack.cobol_dir / "start_HQ.sh")],
-            cwd=fake_stack.cobol_dir,
+            [str(fake_stack.llm_dir / "start_HQ.sh")],
+            cwd=fake_stack.llm_dir,
             env=fake_stack.env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -299,7 +345,7 @@ def test_existing_dependencies_are_reused_and_stopped(fake_stack: FakeStack) -> 
     try:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if {"cobol", "silly", "pockettts", "alltalk"} <= {
+            if {"llm", "silly", "pockettts", "alltalk"} <= {
                 service for service, _cwd, _pid in fake_stack.read_events()
             }:
                 break
@@ -309,18 +355,18 @@ def test_existing_dependencies_are_reused_and_stopped(fake_stack: FakeStack) -> 
 
         supervisor = fake_stack.start()
         fake_stack.wait_for_services(
-            supervisor, {"cobol", "silly", "pockettts", "alltalk", "proxy"}
+            supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
         )
         supervisor.send_signal(signal.SIGINT)
         output = supervisor.communicate(timeout=12)[0]
 
         assert supervisor.returncode == 130
-        assert "CobolCpp is already reachable" in output
+        assert "KoboldCpp is already reachable" in output
         assert "silly is already running in its expected directory" in output
         assert "PocketTTS bridge is already ready on port 8008" in output
         assert "AllTalk is already ready on port 7851" in output
         event_names = [service for service, _cwd, _pid in fake_stack.read_events()]
-        assert event_names.count("cobol") == 1
+        assert event_names.count("llm") == 1
         assert event_names.count("silly") == 1
         assert event_names.count("pockettts") == 1
         assert event_names.count("alltalk") == 1
@@ -357,7 +403,7 @@ def test_proxy_port_owner_is_stopped_before_proxy_start(fake_stack: FakeStack) -
     try:
         supervisor = fake_stack.start()
         fake_stack.wait_for_services(
-            supervisor, {"cobol", "silly", "pockettts", "alltalk", "proxy"}
+            supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
         )
         owner.wait(timeout=5)
         supervisor.send_signal(signal.SIGINT)
@@ -379,7 +425,7 @@ def test_alltalk_waits_for_pockettts_bridge_readiness(fake_stack: FakeStack) -> 
     supervisor = fake_stack.start()
 
     try:
-        fake_stack.wait_for_services(supervisor, {"cobol", "silly", "pockettts"})
+        fake_stack.wait_for_services(supervisor, {"llm", "silly", "pockettts"})
         time.sleep(0.5)
         event_names = {service for service, _cwd, _pid in fake_stack.read_events()}
         assert "alltalk" not in event_names
@@ -387,7 +433,7 @@ def test_alltalk_waits_for_pockettts_bridge_readiness(fake_stack: FakeStack) -> 
 
         ready_file.touch()
         fake_stack.wait_for_services(
-            supervisor, {"cobol", "silly", "pockettts", "alltalk", "proxy"}
+            supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
         )
         supervisor.send_signal(signal.SIGINT)
         output = supervisor.communicate(timeout=12)[0]
@@ -400,13 +446,13 @@ def test_alltalk_waits_for_pockettts_bridge_readiness(fake_stack: FakeStack) -> 
             supervisor.communicate(timeout=5)
 
 
-def test_proxy_waits_for_kobold_http_readiness(fake_stack: FakeStack) -> None:
-    ready_file = fake_stack.root / "kobold-ready"
-    fake_stack.env["FAKE_KOBOLD_READY_FILE"] = str(ready_file)
+def test_proxy_waits_for_llm_backend_readiness(fake_stack: FakeStack) -> None:
+    ready_file = fake_stack.root / "llm-ready"
+    fake_stack.env["FAKE_LLM_READY_FILE"] = str(ready_file)
     supervisor = fake_stack.start()
 
     try:
-        fake_stack.wait_for_services(supervisor, {"cobol", "silly", "pockettts", "alltalk"})
+        fake_stack.wait_for_services(supervisor, {"llm", "silly", "pockettts", "alltalk"})
         time.sleep(0.5)
         assert "proxy" not in {
             service for service, _cwd, _pid in fake_stack.read_events()
@@ -414,7 +460,7 @@ def test_proxy_waits_for_kobold_http_readiness(fake_stack: FakeStack) -> None:
 
         ready_file.touch()
         fake_stack.wait_for_services(
-            supervisor, {"cobol", "silly", "pockettts", "alltalk", "proxy"}
+            supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
         )
         supervisor.send_signal(signal.SIGINT)
         output = supervisor.communicate(timeout=12)[0]
@@ -427,13 +473,81 @@ def test_proxy_waits_for_kobold_http_readiness(fake_stack: FakeStack) -> None:
             supervisor.communicate(timeout=5)
 
 
+def test_ollama_profile_uses_generic_llm_configuration(fake_stack: FakeStack) -> None:
+    ollama_dir = fake_stack.home / "ollama"
+    ollama_command = ollama_dir / "start-ollama.sh"
+    _write_executable(
+        ollama_command,
+        """#!/bin/sh
+set -eu
+printf '%s|%s|%s\\n' "llm" "$PWD" "$$" >> "$STACK_EVENT_LOG"
+trap 'exit 0' INT TERM HUP
+while :; do sleep 1; done
+""",
+    )
+    fake_stack.env.update(
+        {
+            "ST_PROXY_LLM_BACKEND": "ollama",
+            "ST_PROXY_LLM_URL": "http://127.0.0.1:11434",
+            "ST_STACK_LLM_DIR": str(ollama_dir),
+            "ST_STACK_LLM_COMMAND": "./start-ollama.sh",
+        }
+    )
+
+    supervisor = fake_stack.start()
+    events = fake_stack.wait_for_services(
+        supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
+    )
+    proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
+    proxy_command = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    supervisor.send_signal(signal.SIGINT)
+    output = supervisor.communicate(timeout=12)[0]
+
+    assert supervisor.returncode == 130
+    assert "--llm-backend ollama" in proxy_command
+    assert "--llm-url http://127.0.0.1:11434" in proxy_command
+    assert "starting Ollama" in output
+
+
+def test_monitor_allows_adapter_to_stop_llm_process(fake_stack: FakeStack) -> None:
+    supervisor = fake_stack.start()
+    events = fake_stack.wait_for_services(
+        supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
+    )
+    llm_pid = next(pid for service, _cwd, pid in events if service == "llm")
+    os.killpg(llm_pid, signal.SIGTERM)
+    time.sleep(1.5)
+
+    assert supervisor.poll() is None
+    supervisor.send_signal(signal.SIGINT)
+    output = supervisor.communicate(timeout=12)[0]
+    assert supervisor.returncode == 130, output
+
+
+def test_monitor_stops_when_broker_reports_backend_unavailable(
+    fake_stack: FakeStack,
+) -> None:
+    unhealthy_file = fake_stack.root / "broker-unhealthy"
+    fake_stack.env["FAKE_BROKER_UNHEALTHY_FILE"] = str(unhealthy_file)
+    supervisor = fake_stack.start()
+    fake_stack.wait_for_services(
+        supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
+    )
+    time.sleep(0.5)
+    unhealthy_file.touch()
+    output = supervisor.communicate(timeout=12)[0]
+
+    assert supervisor.returncode == 1
+    assert "proxy reports the LLM backend unavailable" in output
+
+
 def test_proxy_waits_for_alltalk_ready_response(fake_stack: FakeStack) -> None:
     ready_file = fake_stack.root / "alltalk-ready"
     fake_stack.env["FAKE_ALLTALK_READY_FILE"] = str(ready_file)
     supervisor = fake_stack.start()
 
     try:
-        fake_stack.wait_for_services(supervisor, {"cobol", "silly", "pockettts", "alltalk"})
+        fake_stack.wait_for_services(supervisor, {"llm", "silly", "pockettts", "alltalk"})
         time.sleep(0.5)
         assert "proxy" not in {
             service for service, _cwd, _pid in fake_stack.read_events()
@@ -441,7 +555,7 @@ def test_proxy_waits_for_alltalk_ready_response(fake_stack: FakeStack) -> None:
 
         ready_file.touch()
         fake_stack.wait_for_services(
-            supervisor, {"cobol", "silly", "pockettts", "alltalk", "proxy"}
+            supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
         )
         supervisor.send_signal(signal.SIGINT)
         output = supervisor.communicate(timeout=12)[0]

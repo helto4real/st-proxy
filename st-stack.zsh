@@ -8,15 +8,44 @@ umask 077
 typeset -gr SCRIPT_PATH=${0:A}
 typeset -gr SCRIPT_DIR=${SCRIPT_PATH:h}
 
-typeset -gr COBOL_DIR="${HOME}/git/cobolcpp"
-typeset -gr COBOL_COMMAND="./start_HQ.sh"
 typeset -gr SILLY_DIR="${HOME}/git/SillyTavern"
 typeset -gr POCKETTTS_DIR="${HOME}/git/alltalk-pocket-tts-integraion"
 typeset -gr ALLTALK_DIR="${HOME}/git/alltalk_tts"
 typeset -gr ALLTALK_COMMAND="${HOME}/.dotfiles/config/dotconfig/scripts/start_all_talk.sh"
 typeset -gr PROXY_COMMAND="./.venv/bin/st-vram-proxy"
-typeset -gr KOBOLD_URL="${ST_PROXY_KOBOLD_URL:-http://127.0.0.1:5001}"
+typeset -gr PROXY_PATH="${SCRIPT_DIR}/.venv/bin/st-vram-proxy"
 typeset -gr COMFY_URL="${ST_PROXY_COMFY_URL:-http://127.0.0.1:8188}"
+
+typeset -g LLM_BACKEND="${ST_PROXY_LLM_BACKEND:-koboldcpp}"
+typeset -g LLM_LABEL=""
+typeset -g LLM_DEFAULT_URL=""
+typeset -g LLM_DEFAULT_DIR=""
+typeset -g LLM_DEFAULT_COMMAND=""
+case "${LLM_BACKEND}" in
+    koboldcpp)
+        LLM_LABEL="KoboldCpp"
+        LLM_DEFAULT_URL="http://127.0.0.1:5001"
+        LLM_DEFAULT_DIR="${HOME}/git/cobolcpp"
+        LLM_DEFAULT_COMMAND="./start_HQ.sh"
+        ;;
+    ollama)
+        LLM_LABEL="Ollama"
+        LLM_DEFAULT_URL="http://127.0.0.1:11434"
+        LLM_DEFAULT_DIR="${HOME}"
+        LLM_DEFAULT_COMMAND="ollama serve"
+        ;;
+    *)
+        LLM_LABEL="${LLM_BACKEND}"
+        ;;
+esac
+typeset -g LLM_URL="${ST_PROXY_LLM_URL:-${ST_PROXY_KOBOLD_URL:-${LLM_DEFAULT_URL}}}"
+typeset -g LLM_DIR="${ST_STACK_LLM_DIR:-${LLM_DEFAULT_DIR}}"
+typeset -g LLM_COMMAND_TEXT="${ST_STACK_LLM_COMMAND:-${LLM_DEFAULT_COMMAND}}"
+typeset -ga LLM_COMMAND=(${(z)LLM_COMMAND_TEXT})
+typeset -g LLM_COMMAND_NAME=""
+if (( ${#LLM_COMMAND} )); then
+    LLM_COMMAND_NAME=${LLM_COMMAND[1]:t:l}
+fi
 
 typeset -gr RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 typeset -gr RUNTIME_DIR="${RUNTIME_BASE}/st-stack-${UID}"
@@ -31,7 +60,7 @@ typeset -g START_TIMEOUT="${ST_STACK_START_TIMEOUT:-60}"
 typeset -g STOP_TIMEOUT="${ST_STACK_STOP_TIMEOUT:-10}"
 typeset -g PROXY_CHAT_PORT="${ST_PROXY_CHAT_PORT:-5002}"
 typeset -g PROXY_IMAGE_PORT="${ST_PROXY_IMAGE_PORT:-8189}"
-typeset -g KOBOLD_PORT=""
+typeset -g LLM_PORT=""
 typeset -g POCKETTTS_PORT="${ST_STACK_POCKETTTS_PORT:-8008}"
 typeset -g ALLTALK_PORT="${ST_STACK_ALLTALK_PORT:-7851}"
 
@@ -93,8 +122,15 @@ parse_args() {
         log "ST_STACK_POCKETTTS_PORT must be an integer between 1 and 65535"
         return 2
     fi
-    if [[ "${KOBOLD_URL}" =~ '^https?://[^/:]+:([0-9]+)(/.*)?$' ]]; then
-        KOBOLD_PORT=${match[1]}
+    if [[ -z "${LLM_BACKEND}" || -z "${LLM_URL}" || -z "${LLM_DIR}" || -z "${LLM_COMMAND_NAME}" ]]; then
+        log "LLM backend, URL, directory and command must be configured"
+        return 2
+    fi
+    if [[ "${LLM_URL}" =~ '^https?://[^/:]+:([0-9]+)(/.*)?$' ]]; then
+        LLM_PORT=${match[1]}
+    else
+        log "ST_PROXY_LLM_URL must include http(s), a host and an explicit port"
+        return 2
     fi
 }
 
@@ -135,11 +171,9 @@ process_matches_service() {
     command_lower=${PROCESS_COMMAND:l}
 
     case "${service}" in
-        cobol)
-            [[ "${PROCESS_CWD}" == "${COBOL_DIR}" ]] &&
-                [[ "${command_lower}" == *start_hq.sh* ||
-                    "${command_lower}" == *koboldcpp* ||
-                    "${command_lower}" == *cobolcpp* ]]
+        llm)
+            [[ "${PROCESS_CWD}" == "${LLM_DIR}" ]] &&
+                [[ "${command_lower}" == *"${LLM_COMMAND_NAME}"* ]]
             ;;
         silly)
             [[ "${PROCESS_CWD}" == "${SILLY_DIR}" ]] &&
@@ -188,11 +222,13 @@ service_running() {
     find_service_pids "$1"
 }
 
-kobold_ready() {
-    command -v curl >/dev/null 2>&1 || return 1
-    curl --silent --fail --output /dev/null \
-        --connect-timeout 0.5 --max-time 1 \
-        "${KOBOLD_URL%/}/api/v1/info/version" 2>/dev/null
+llm_ready() {
+    [[ -x "${PROXY_PATH}" ]] || return 1
+    "${PROXY_PATH}" \
+        --check-backend \
+        --backend-check-timeout 1 \
+        --llm-backend "${LLM_BACKEND}" \
+        --llm-url "${LLM_URL}" >/dev/null 2>&1
 }
 
 pockettts_ready() {
@@ -210,6 +246,17 @@ alltalk_ready() {
         --connect-timeout 0.5 --max-time 1 \
         "http://127.0.0.1:${ALLTALK_PORT}/api/ready" 2>/dev/null) || return 1
     [[ "${response}" == Ready ]]
+}
+
+broker_healthy() {
+    local response
+
+    command -v curl >/dev/null 2>&1 || return 1
+    response=$(curl --silent --fail \
+        --connect-timeout 0.5 --max-time 1 \
+        "http://127.0.0.1:${PROXY_CHAT_PORT}/broker/status" 2>/dev/null) || return 1
+    [[ "${response}" == *'"chat_available": true'* ||
+        "${response}" == *'"chat_available":true'* ]]
 }
 
 pgid_file() {
@@ -363,8 +410,8 @@ launch_in_directory() {
 ensure_service_started() {
     local service=$1
 
-    if [[ "${service}" == cobol ]] && kobold_ready; then
-        log "CobolCpp is already reachable at ${KOBOLD_URL}"
+    if [[ "${service}" == llm ]] && llm_ready; then
+        log "${LLM_LABEL} is already reachable at ${LLM_URL}"
         return 0
     fi
     if [[ "${service}" == pockettts ]] && pockettts_ready; then
@@ -381,9 +428,9 @@ ensure_service_started() {
     fi
 
     case "${service}" in
-        cobol)
-            log "starting CobolCpp in ${COBOL_DIR}"
-            launch_in_directory cobol "${COBOL_DIR}" 1 "${COBOL_COMMAND}"
+        llm)
+            log "starting ${LLM_LABEL} in ${LLM_DIR}"
+            launch_in_directory llm "${LLM_DIR}" 1 "${LLM_COMMAND[@]}"
             ;;
         silly)
             log "starting SillyTavern in ${SILLY_DIR}"
@@ -401,7 +448,8 @@ ensure_service_started() {
         proxy)
             log "starting proxy in ${SCRIPT_DIR}"
             launch_in_directory proxy "${SCRIPT_DIR}" 0 "${PROXY_COMMAND}" \
-                --kobold-url "${KOBOLD_URL}" \
+                --llm-backend "${LLM_BACKEND}" \
+                --llm-url "${LLM_URL}" \
                 --comfy-url "${COMFY_URL}" \
                 --chat-port "${PROXY_CHAT_PORT}" \
                 --image-port "${PROXY_IMAGE_PORT}"
@@ -435,14 +483,14 @@ wait_for_dependencies() {
 
     while (( SECONDS < deadline )); do
         missing=()
-        kobold_ready || missing+=(cobol)
+        llm_ready || missing+=(llm)
         pockettts_ready || missing+=(pockettts)
         alltalk_ready || missing+=(alltalk)
         for service in silly; do
             service_running "${service}" || missing+=("${service}")
         done
         if (( ${#missing} == 0 )); then
-            log "CobolCpp, SillyTavern, PocketTTS bridge and AllTalk are running"
+            log "${LLM_LABEL}, SillyTavern, PocketTTS bridge and AllTalk are running"
             return 0
         fi
         sleep 0.2
@@ -456,14 +504,14 @@ wait_for_proxy() {
     local deadline=$(( SECONDS + START_TIMEOUT ))
 
     while (( SECONDS < deadline )); do
-        if service_running proxy; then
-            log "proxy is running"
+        if service_running proxy && broker_healthy; then
+            log "proxy is running and healthy"
             return 0
         fi
         sleep 0.2
     done
 
-    log "timed out waiting for proxy"
+    log "timed out waiting for a healthy proxy"
     return 1
 }
 
@@ -489,8 +537,8 @@ collect_service_targets() {
     fi
 
     case "${service}" in
-        cobol)
-            service_port=${KOBOLD_PORT}
+        llm)
+            service_port=${LLM_PORT}
             ;;
         pockettts)
             service_port=${POCKETTTS_PORT}
@@ -596,7 +644,7 @@ cleanup() {
     stop_service alltalk || result=1
     stop_service pockettts || result=1
     stop_service silly || result=1
-    stop_service cobol || result=1
+    stop_service llm || result=1
 
     if (( OWNS_LOCK )); then
         rm -f -- "${SUPERVISOR_FILE}"
@@ -671,7 +719,7 @@ stop_stack() {
     stop_service alltalk || result=1
     stop_service pockettts || result=1
     stop_service silly || result=1
-    stop_service cobol || result=1
+    stop_service llm || result=1
     rm -f -- "${SUPERVISOR_FILE}"
     rmdir -- "${LOCK_DIR}" 2>/dev/null || true
     rmdir -- "${RUNTIME_DIR}" 2>/dev/null || true
@@ -692,8 +740,8 @@ monitor_stack() {
                 return 1
             fi
         done
-        if ! service_running cobol && ! kobold_ready; then
-            log "CobolCpp is no longer running or reachable; stopping the stack"
+        if ! broker_healthy; then
+            log "proxy reports the LLM backend unavailable; stopping the stack"
             return 1
         fi
         if ! service_running pockettts && ! pockettts_ready; then
@@ -751,13 +799,13 @@ main() {
         return ${lock_status}
     fi
 
-    ensure_service_started cobol || return 1
+    ensure_service_started llm || return 1
     ensure_service_started silly || return 1
     ensure_service_started pockettts || return 1
     log "waiting for PocketTTS bridge readiness at http://127.0.0.1:${POCKETTTS_PORT}/health"
     wait_for_pockettts || return 1
     ensure_service_started alltalk || return 1
-    log "waiting for KoboldCpp readiness at ${KOBOLD_URL}"
+    log "waiting for ${LLM_LABEL} readiness at ${LLM_URL}"
     log "waiting for AllTalk readiness at http://127.0.0.1:${ALLTALK_PORT}/api/ready"
     wait_for_dependencies || return 1
 

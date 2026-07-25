@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 
-from .clients import ComfyClient, KoboldClient
+from .comfy import ComfyClient
 from .config import BrokerConfig
 from .coordinator import HandoffCoordinator
 from .errors import BrokerError, ChatUnavailable
 from .http import filtered_request_headers, proxy_stream
+from .llm import LlmBackend, build_llm_backend
 
 LOG = logging.getLogger(__name__)
 STATUS_PATH = "/broker/status"
@@ -33,6 +35,7 @@ class BrokerService:
     def __init__(self, config: BrokerConfig) -> None:
         self.config = config
         self.session: ClientSession | None = None
+        self.llm: LlmBackend[Any] | None = None
         self.coordinator: HandoffCoordinator | None = None
         self._chat_runner: web.AppRunner | None = None
         self._image_runner: web.AppRunner | None = None
@@ -48,9 +51,10 @@ class BrokerService:
             connector=TCPConnector(force_close=True),
             auto_decompress=False,
         )
+        self.llm = build_llm_backend(self.session, self.config)
         self.coordinator = HandoffCoordinator(
             self.config,
-            KoboldClient(self.session, self.config),
+            self.llm,
             ComfyClient(self.session, self.config),
         )
         await self.coordinator.initialize()
@@ -86,16 +90,24 @@ class BrokerService:
         if request.path == STATUS_PATH:
             return await self._status()
         started = time.monotonic()
+        assert self.llm is not None
+        label = self.llm.info.label
         LOG.info(
-            "request started: target=KoboldCpp method=%s path=%s",
+            "request started: target=%s method=%s path=%s",
+            label,
             request.method,
             request.path,
         )
         try:
             async with self.coordinator.chat_lease():
-                response = await proxy_stream(request, self.session, self.config.kobold_url)
+                response = await proxy_stream(
+                    request,
+                    self.session,
+                    self.llm.info.chat_origin,
+                )
             LOG.info(
-                "request completed: target=KoboldCpp method=%s path=%s status=%s duration=%.3fs",
+                "request completed: target=%s method=%s path=%s status=%s duration=%.3fs",
+                label,
                 request.method,
                 request.path,
                 response.status,
@@ -104,8 +116,9 @@ class BrokerService:
             return response
         except ChatUnavailable as exc:
             LOG.warning(
-                "request rejected: target=KoboldCpp method=%s path=%s status=503 reason=%s "
+                "request rejected: target=%s method=%s path=%s status=503 reason=%s "
                 "duration=%.3fs",
+                label,
                 request.method,
                 request.path,
                 exc,
@@ -114,14 +127,18 @@ class BrokerService:
             return web.json_response({"error": str(exc)}, status=503)
         except (BrokerError, ClientError, TimeoutError) as exc:
             LOG.warning(
-                "request failed: target=KoboldCpp method=%s path=%s status=502 "
+                "request failed: target=%s method=%s path=%s status=502 "
                 "error=%s duration=%.3fs",
+                label,
                 request.method,
                 request.path,
                 type(exc).__name__,
                 time.monotonic() - started,
             )
-            return web.json_response({"error": "KoboldCpp upstream request failed"}, status=502)
+            return web.json_response(
+                {"error": f"{label} upstream request failed"},
+                status=502,
+            )
 
     async def _image_handler(self, request: web.Request) -> web.StreamResponse:
         assert self.coordinator is not None and self.session is not None
@@ -198,4 +215,5 @@ class BrokerService:
         if self.session is not None:
             await self.session.close()
             self.session = None
+        self.llm = None
         LOG.info("broker stopped")

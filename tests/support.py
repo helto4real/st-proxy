@@ -188,6 +188,72 @@ class MockComfy:
         return web.json_response({"ok": True})
 
 
+@dataclass
+class MockOllama:
+    loaded_models: list[str] = field(default_factory=lambda: ["synthetic-model:latest"])
+    lifecycle_calls: list[tuple[str, int]] = field(default_factory=list)
+    chat_requests: int = 0
+    unload_failures: int = 0
+    load_failures: int = 0
+
+    def app(self) -> web.Application:
+        app = web.Application()
+        app.router.add_get("/api/version", self.version)
+        app.router.add_get("/api/ps", self.running_models)
+        app.router.add_post("/api/generate", self.generate)
+        app.router.add_post("/api/chat", self.chat)
+        app.router.add_route("*", "/{tail:.*}", self.generic)
+        return app
+
+    async def version(self, _request: web.Request) -> web.Response:
+        return web.json_response({"version": "test-fixture"})
+
+    async def running_models(self, _request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "models": [
+                    {
+                        "name": model,
+                        "model": model,
+                        "size": 1,
+                        "size_vram": 1,
+                    }
+                    for model in self.loaded_models
+                ]
+            }
+        )
+
+    async def generate(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        model = str(payload["model"])
+        keep_alive = int(payload["keep_alive"])
+        self.lifecycle_calls.append((model, keep_alive))
+        if keep_alive == 0:
+            if self.unload_failures:
+                self.unload_failures -= 1
+                return web.json_response({"error": "synthetic unload failure"}, status=500)
+            self.loaded_models.clear()
+        elif keep_alive < 0:
+            if self.load_failures:
+                self.load_failures -= 1
+                return web.json_response({"error": "synthetic load failure"}, status=500)
+            self.loaded_models[:] = [model]
+        return web.json_response({"model": model, "done": True, "response": ""})
+
+    async def chat(self, _request: web.Request) -> web.Response:
+        self.chat_requests += 1
+        return web.json_response(
+            {
+                "model": self.loaded_models[0] if self.loaded_models else None,
+                "done": True,
+                "message": {"role": "assistant", "content": "synthetic"},
+            }
+        )
+
+    async def generic(self, _request: web.Request) -> web.Response:
+        return web.json_response({"ok": True})
+
+
 def prompt_payload() -> dict[str, Any]:
     return {
         "client_id": "synthetic-client",

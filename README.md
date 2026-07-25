@@ -1,55 +1,55 @@
 # st-vram-proxy
 
-`st-vram-proxy` is a loopback-only broker that gives one GPU exclusively to
-KoboldCpp or ComfyUI. SillyTavern talks to the broker on two ports, while the
-real applications listen on different loopback ports behind it.
+`st-vram-proxy` is a loopback-only broker that gives one GPU exclusively to a
+supported LLM backend or ComfyUI. SillyTavern talks to the broker on two ports,
+while the real applications listen on different loopback ports behind it.
+
+Supported LLM backends:
+
+- KoboldCpp, controlled through Model Administration.
+- Ollama, controlled through `/api/ps` and the `keep_alive` lifecycle API.
 
 New to the project? Start with the illustrated
 [user guide](docs/USER_GUIDE.md).
 
 ```text
-SillyTavern chat  -> 127.0.0.1:5001 -> broker -> KoboldCpp 127.0.0.1:5002
+SillyTavern chat  -> 127.0.0.1:5001 -> broker -> selected LLM backend
 SillyTavern image -> 127.0.0.1:8188 -> broker -> ComfyUI   127.0.0.1:8189
 ```
 
 Chat and ComfyUI `POST /prompt` requests enter one FIFO queue. The broker changes
 GPU ownership only when the request at the head of that queue needs the other
 backend. When switching to ComfyUI, it drains active chat responses (including
-streams), unloads KoboldCpp, and confirms its model endpoint reports an inactive
-model. Consecutive image jobs then run serially without reloading KoboldCpp
-between them.
+streams), asks the selected adapter to release its GPU resources, and waits for
+the adapter to confirm release. Consecutive image jobs then run serially without
+reloading the LLM between them.
 
 When an LLM request reaches the head of the queue, the broker calls ComfyUI
-`/free`, reloads KoboldCpp's startup model, verifies that the same model seen at
-startup is ready, and releases the chat request. If the queue becomes empty, the
-current backend keeps the GPU: ComfyUI remains ready after an image until an LLM
-request actually needs the GPU, and KoboldCpp remains ready until an image does.
-No request can overtake a request for the other backend.
+`/free`, restores the LLM state captured at startup, verifies readiness, and
+releases the chat request. If the queue becomes empty, the current backend keeps
+the GPU. No request can overtake a request for the other backend.
 
-When the broker starts, it first calls ComfyUI `/free` and confirms that
-KoboldCpp has a loaded model before accepting chat requests. This clears VRAM
-that a previously used ComfyUI instance may still hold. If either startup check
-fails, chat remains fail-closed with HTTP 503.
+When the broker starts, it validates the selected LLM lifecycle API, calls
+ComfyUI `/free`, and captures one ready LLM model before accepting chat
+requests. This clears VRAM that a previously used ComfyUI instance may still
+hold. If any startup check fails, chat remains fail-closed with HTTP 503.
 
-Before changing GPU ownership, startup also verifies that KoboldCpp reports
-Model Administration enabled and exposes the `unload_model` and `initial_model`
-admin options. A missing required directory or incorrect Admin password produces
-an actionable console error and keeps the broker fail-closed.
+For KoboldCpp, startup verifies Model Administration and the `unload_model` and
+`initial_model` options. For Ollama, startup requires exactly one model in
+`/api/ps`; this makes the restore target deterministic.
 
-If the final KoboldCpp readiness check fails, chat remains fail-closed and gets
-HTTP 503. This prevents an accidental LLM request while GPU ownership is
-unknown. The latest error is visible at `GET /broker/status` on either broker
-port.
+If the final LLM readiness check fails, chat remains fail-closed and gets HTTP
+503. The latest error is visible at `GET /broker/status` on either broker port.
 
 ## Requirements
 
 - Python 3.11 or newer
-- KoboldCpp with Admin mode enabled
+- KoboldCpp with Admin mode enabled, or Ollama with exactly one loaded model
 - ComfyUI API mode
-- SillyTavern configured with separate KoboldCpp and ComfyUI URLs
+- SillyTavern configured with separate chat and ComfyUI URLs
 
-The examples keep every service on loopback. Do not expose the broker,
-KoboldCpp Admin API, or ComfyUI directly to an untrusted network.
+The examples keep every service on loopback. Do not expose the broker, an LLM
+control API, or ComfyUI directly to an untrusted network.
 
 ## Install
 
@@ -76,6 +76,8 @@ python -m pip install -e .
 Start the backends first. Replace paths and normal model options with the ones
 you already use.
 
+### KoboldCpp
+
 KoboldCpp must use a port other than the broker's chat port and must have Admin
 mode enabled. `--admindir` is required by KoboldCpp for reload operations:
 
@@ -99,6 +101,20 @@ On Windows, use the equivalent KoboldCpp GUI fields: port `5002`, host
 `127.0.0.1`, Admin enabled, and an Admin/config directory. Keep the model you
 want restored selected as the startup model.
 
+### Ollama
+
+Start Ollama and preload exactly one model:
+
+```bash
+ollama serve
+ollama run gemma3 ""
+```
+
+The proxy records the model returned by `/api/ps`, unloads it with
+`keep_alive: 0`, and restores it with `keep_alive: -1`.
+
+### ComfyUI
+
 Start ComfyUI on a different loopback port:
 
 ```bash
@@ -115,16 +131,33 @@ Then start the broker:
 
 ```bash
 st-vram-proxy \
-  --kobold-url http://127.0.0.1:5002 \
+  --llm-backend koboldcpp \
+  --llm-url http://127.0.0.1:5002 \
   --comfy-url http://127.0.0.1:8189 \
   --chat-port 5001 \
   --image-port 8188
 ```
 
+For Ollama, select the other adapter and origin:
+
+```bash
+st-vram-proxy \
+  --llm-backend ollama \
+  --llm-url http://127.0.0.1:11434 \
+  --comfy-url http://127.0.0.1:8189
+```
+
+Check lifecycle control and model readiness without starting the listeners:
+
+```bash
+st-vram-proxy --check-backend --llm-backend ollama
+```
+
 The equivalent environment-only configuration is:
 
 ```bash
-export ST_PROXY_KOBOLD_URL=http://127.0.0.1:5002
+export ST_PROXY_LLM_BACKEND=koboldcpp
+export ST_PROXY_LLM_URL=http://127.0.0.1:5002
 export ST_PROXY_COMFY_URL=http://127.0.0.1:8189
 export ST_PROXY_CHAT_PORT=5001
 export ST_PROXY_IMAGE_PORT=8188
@@ -133,14 +166,14 @@ st-vram-proxy
 
 ## Configure SillyTavern
 
-1. In SillyTavern's API Connections panel, select KoboldCpp/KoboldAI and set its
-   server URL to `http://127.0.0.1:5001`. Connect normally.
+1. In SillyTavern's API Connections panel, select the API type matching your LLM
+   backend and set its server URL to `http://127.0.0.1:5001`.
 2. In the Image Generation extension, select ComfyUI and set its server URL to
    `http://127.0.0.1:8188`.
-3. Keep KoboldCpp itself on `5002` and ComfyUI itself on `8189`. SillyTavern
-   should not point directly to either upstream port.
+3. Keep the real LLM and ComfyUI on their upstream ports. SillyTavern should not
+   point directly to either upstream.
 
-No SillyTavern, KoboldCpp, or ComfyUI source changes are needed.
+No SillyTavern, LLM-backend, or ComfyUI source changes are needed.
 
 Check state without touching either backend directly:
 
@@ -159,7 +192,8 @@ Example idle response:
   "waiting_images": 0,
   "active_prompt_id": null,
   "last_error": null,
-  "chat_available": true
+  "chat_available": true,
+  "llm_backend": "koboldcpp"
 }
 ```
 
@@ -172,7 +206,8 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--listen-host` | `ST_PROXY_LISTEN_HOST` | `127.0.0.1` |
 | `--chat-port` | `ST_PROXY_CHAT_PORT` | `5001` |
 | `--image-port` | `ST_PROXY_IMAGE_PORT` | `8188` |
-| `--kobold-url` | `ST_PROXY_KOBOLD_URL` | `http://127.0.0.1:5002` |
+| `--llm-backend` | `ST_PROXY_LLM_BACKEND` | `koboldcpp` |
+| `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` |
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset |
 | `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `600` seconds |
@@ -182,7 +217,30 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--reload-timeout` | `ST_PROXY_RELOAD_TIMEOUT` | `600` seconds |
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds |
+| `--check-backend` | — | disabled |
+| `--backend-check-timeout` | `ST_PROXY_BACKEND_CHECK_TIMEOUT` | `2` seconds |
 | `--log-level` | `ST_PROXY_LOG_LEVEL` | `INFO` |
+
+`--kobold-url` and `ST_PROXY_KOBOLD_URL` remain compatibility aliases for the
+generic LLM origin. Backend defaults are `http://127.0.0.1:5002` for KoboldCpp
+and `http://127.0.0.1:11434` for Ollama.
+
+## Adding another LLM backend
+
+Provider mechanics live under `src/st_proxy/llm/`; FIFO policy and ComfyUI do
+not depend on a concrete provider. A new adapter must:
+
+1. Implement `validate_control`, `snapshot_ready`, `release_gpu`, and
+   `acquire_gpu` from `LlmBackend`.
+2. Return from release/acquire only after their postcondition has been checked.
+3. Use sanitized errors and avoid logging model names, prompts, or secrets.
+4. Add one `BackendSpec` in `llm/registry.py`.
+5. Add adapter contract tests. Coordinator/FIFO tests use a fake backend and
+   should not need changes.
+
+Use GPU lifecycle semantics rather than assuming every provider literally
+unloads and reloads a model. A future adapter may stop/start a managed process
+while keeping the same coordinator contract.
 
 Upstream URLs cannot contain embedded credentials. Request bodies, prompts,
 generated data, authorization headers, and the Admin password are never logged.
@@ -190,7 +248,7 @@ The HTTP access log is disabled.
 
 At the default `INFO` level, the broker logs request methods, paths, response
 status codes and durations; GPU ownership and handoff state changes; ComfyUI
-VRAM cleanup; KoboldCpp unload/reload readiness; and controlled failures. It
+VRAM cleanup; LLM release/acquire readiness; and controlled failures. It
 does not log query strings, request or response bodies, model names, prompts,
 generated content, or authorization values. ComfyUI confirms that `/free`
 completed but does not report an exact number of bytes freed.
@@ -200,7 +258,7 @@ High-frequency successful ComfyUI `GET /history` polling is logged only at
 ## Automated tests: isolated and safe
 
 The automated suite does **not** discover or contact installed applications.
-It starts synthetic KoboldCpp and ComfyUI fixtures on OS-assigned loopback ports,
+It starts synthetic KoboldCpp, Ollama, and ComfyUI fixtures on OS-assigned loopback ports,
 starts the broker itself on OS-assigned ports, and uses a process-local endpoint
 registry. Test mode refuses conventional ports, external hosts, and any upstream
 not explicitly registered by that test process.
@@ -223,8 +281,7 @@ the test harness.
 This is never run by the automated suite. It contacts the real services you
 started above and will unload/reload real models:
 
-1. Confirm KoboldCpp is on `127.0.0.1:5002` and ComfyUI is on
-   `127.0.0.1:8189`.
+1. Confirm the configured LLM backend and ComfyUI are on their upstream ports.
 2. Start the broker and confirm `/broker/status` says `llm_ready`.
 3. Start a SillyTavern chat and let it finish.
 4. Request one image from SillyTavern.

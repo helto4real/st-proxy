@@ -6,9 +6,17 @@ import logging
 import os
 import signal
 from collections.abc import Sequence
+from dataclasses import replace
+
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
 
 from .config import BrokerConfig
-from .errors import ConfigurationError
+from .errors import BrokerError, ConfigurationError
+from .llm import (
+    available_backend_kinds,
+    backend_default_origin,
+    build_llm_backend,
+)
 from .service import BrokerService
 
 LOG = logging.getLogger(__name__)
@@ -33,7 +41,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--listen-host", default=_env("LISTEN_HOST", "127.0.0.1"))
     parser.add_argument("--chat-port", type=int, default=_env_int("CHAT_PORT", 5001))
     parser.add_argument("--image-port", type=int, default=_env_int("IMAGE_PORT", 8188))
-    parser.add_argument("--kobold-url", default=_env("KOBOLD_URL", "http://127.0.0.1:5002"))
+    parser.add_argument(
+        "--llm-backend",
+        choices=available_backend_kinds(),
+        default=_env("LLM_BACKEND", "koboldcpp"),
+    )
+    parser.add_argument(
+        "--llm-url",
+        "--kobold-url",
+        dest="llm_url",
+        default=_env("LLM_URL") or _env("KOBOLD_URL"),
+        help="LLM origin; --kobold-url is retained as a compatibility alias",
+    )
     parser.add_argument("--comfy-url", default=_env("COMFY_URL", "http://127.0.0.1:8189"))
     parser.add_argument(
         "--kobold-admin-password",
@@ -49,6 +68,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reload-timeout", type=float, default=_env_float("RELOAD_TIMEOUT", 600))
     parser.add_argument("--cleanup-timeout", type=float, default=_env_float("CLEANUP_TIMEOUT", 60))
     parser.add_argument("--poll-interval", type=float, default=_env_float("POLL_INTERVAL", 0.5))
+    parser.add_argument(
+        "--check-backend",
+        action="store_true",
+        help="validate the configured LLM lifecycle API and exit",
+    )
+    parser.add_argument(
+        "--backend-check-timeout",
+        type=float,
+        default=_env_float("BACKEND_CHECK_TIMEOUT", 2),
+    )
     parser.add_argument("--log-level", default=_env("LOG_LEVEL", "INFO"))
     return parser
 
@@ -56,11 +85,13 @@ def build_parser() -> argparse.ArgumentParser:
 def config_from_args(args: argparse.Namespace) -> BrokerConfig:
     if (_env("TEST_MODE", "")).lower() in {"1", "true", "yes", "on"}:
         raise ConfigurationError("test mode is available only to the in-process test harness")
+    llm_url = args.llm_url or backend_default_origin(args.llm_backend)
     return BrokerConfig(
         listen_host=args.listen_host,
         chat_port=args.chat_port,
         image_port=args.image_port,
-        kobold_url=args.kobold_url,
+        llm_backend=args.llm_backend,
+        llm_url=llm_url,
         comfy_url=args.comfy_url,
         kobold_admin_password=args.kobold_admin_password,
         request_timeout=args.request_timeout,
@@ -71,6 +102,28 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         cleanup_timeout=args.cleanup_timeout,
         poll_interval=args.poll_interval,
     )
+
+
+async def check_backend(config: BrokerConfig, timeout_seconds: float) -> None:
+    if timeout_seconds <= 0:
+        raise ConfigurationError("backend_check_timeout must be greater than zero")
+    check_config = replace(
+        config,
+        request_timeout=min(config.request_timeout, timeout_seconds),
+        reload_timeout=min(config.reload_timeout, timeout_seconds),
+        unload_timeout=min(config.unload_timeout, timeout_seconds),
+        poll_interval=min(config.poll_interval, timeout_seconds),
+    )
+    timeout = ClientTimeout(total=None, sock_connect=timeout_seconds)
+    async with ClientSession(
+        timeout=timeout,
+        connector=TCPConnector(force_close=True),
+        auto_decompress=False,
+    ) as session:
+        backend = build_llm_backend(session, check_config)
+        await backend.validate_control()
+        await backend.snapshot_ready()
+        LOG.info("LLM backend ready: backend=%s", backend.info.label)
 
 
 async def run(config: BrokerConfig) -> None:
@@ -120,9 +173,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     try:
         config = config_from_args(args)
-        asyncio.run(run(config))
+        if args.check_backend:
+            asyncio.run(check_backend(config, args.backend_check_timeout))
+        else:
+            asyncio.run(run(config))
     except (ConfigurationError, ValueError) as exc:
         parser.error(str(exc))
+    except BrokerError as exc:
+        LOG.error("%s", exc)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

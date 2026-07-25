@@ -9,10 +9,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from .clients import ComfyClient, KoboldClient
+from .comfy import ComfyClient
 from .config import BrokerConfig
 from .errors import ChatUnavailable, HandoffError
 from .http import BufferedResponse
+from .llm import LlmBackend, RestorePoint
 
 LOG = logging.getLogger(__name__)
 
@@ -68,12 +69,13 @@ class HandoffCoordinator:
     def __init__(
         self,
         config: BrokerConfig,
-        kobold: KoboldClient,
+        llm: LlmBackend[Any],
         comfy: ComfyClient,
     ) -> None:
         self._config = config
-        self._kobold = kobold
+        self._llm = llm
         self._comfy = comfy
+        self._restore_point: RestorePoint | None = None
         self._condition = asyncio.Condition()
         self._queue: deque[QueuedWork] = deque()
         self._sequence = 0
@@ -106,17 +108,18 @@ class HandoffCoordinator:
             "active_prompt_id": self._active_prompt_id,
             "last_error": self._last_error,
             "chat_available": not self._fatal_error and not self._closing,
+            "llm_backend": self._llm.info.kind,
         }
 
     async def initialize(self) -> bool:
-        """Give startup GPU ownership to KoboldCpp before accepting work."""
+        """Give startup GPU ownership to the configured LLM before accepting work."""
         LOG.info("broker initialization started")
         try:
-            await self._kobold.ensure_admin_ready()
+            await self._llm.validate_control()
             self._set_state(HandoffState.CLEANING_COMFY)
             await self._comfy.free_models()
             self._set_state(HandoffState.VERIFYING_LLM)
-            await self._kobold.ensure_loaded()
+            self._restore_point = await self._llm.snapshot_ready()
         except Exception as exc:
             LOG.error("broker initialization failed: %s", exc)
             async with self._condition:
@@ -136,7 +139,10 @@ class HandoffCoordinator:
                 name="st-proxy-fifo-dispatcher",
             )
             self._condition.notify_all()
-        LOG.info("broker initialization completed: GPU owner=KoboldCpp")
+        LOG.info(
+            "broker initialization completed: GPU owner=%s",
+            self._llm.info.label,
+        )
         return True
 
     def _next_sequence(self) -> int:
@@ -267,7 +273,11 @@ class HandoffCoordinator:
             restored = await self._restore_llm(errors)
             self._record_errors(errors)
             if not restored:
-                self._resolve_chat(work, self._fatal_error or "KoboldCpp is not confirmed ready")
+                self._resolve_chat(
+                    work,
+                    self._fatal_error
+                    or f"{self._llm.info.label} is not confirmed ready",
+                )
                 return
 
         async with self._condition:
@@ -343,7 +353,9 @@ class HandoffCoordinator:
 
         self._owner = GpuOwner.UNKNOWN
         self._set_state(HandoffState.UNLOADING_LLM)
-        await self._kobold.unload()
+        if self._restore_point is None:
+            raise HandoffError("LLM restore point is unavailable")
+        await self._llm.release_gpu(self._restore_point)
         self._owner = GpuOwner.COMFY
         self._set_state(HandoffState.COMFY_READY)
         LOG.info("GPU ownership transferred: owner=ComfyUI")
@@ -363,20 +375,27 @@ class HandoffCoordinator:
 
         self._set_state(HandoffState.RELOADING_LLM)
         try:
-            await self._kobold.reload_initial()
+            if self._restore_point is None:
+                raise HandoffError("LLM restore point is unavailable")
+            await self._llm.acquire_gpu(self._restore_point)
         except Exception as exc:
-            LOG.error("KoboldCpp reload failed: %s", exc)
+            LOG.error("%s reload failed: %s", self._llm.info.label, exc)
             errors.append(str(exc))
             self._record_errors(errors)
             if not self._closing:
-                await self._mark_fatal("KoboldCpp is not confirmed ready")
+                await self._mark_fatal(
+                    f"{self._llm.info.label} is not confirmed ready"
+                )
             return False
 
         self._owner = GpuOwner.LLM
         if not self._closing:
             self._fatal_error = None
             self._set_state(HandoffState.LLM_READY)
-            LOG.info("GPU ownership transferred: owner=KoboldCpp")
+            LOG.info(
+                "GPU ownership transferred: owner=%s",
+                self._llm.info.label,
+            )
         return True
 
     def _record_errors(self, errors: list[str]) -> None:

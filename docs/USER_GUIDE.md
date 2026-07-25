@@ -1,8 +1,9 @@
 # st-vram-proxy user guide
 
-`st-vram-proxy` lets SillyTavern use KoboldCpp for chat and ComfyUI for image
-generation on a single GPU. It queues requests in arrival order and ensures
-that only one backend owns GPU VRAM at a time.
+`st-vram-proxy` lets SillyTavern use a supported LLM backend for chat and
+ComfyUI for image generation on a single GPU. It queues requests in arrival
+order and ensures that only one backend owns GPU VRAM at a time. KoboldCpp and
+Ollama are currently supported.
 
 This guide covers installation, first-time setup, everyday operation, status
 monitoring, and troubleshooting.
@@ -13,14 +14,14 @@ monitoring, and troubleshooting.
 
 Use this guide if:
 
-- SillyTavern, KoboldCpp, and ComfyUI run on the same computer.
-- The KoboldCpp model and ComfyUI models do not comfortably fit in VRAM
+- SillyTavern, a supported LLM backend, and ComfyUI run on the same computer.
+- The LLM and ComfyUI models do not comfortably fit in VRAM
   together.
 - You want image and chat requests to wait safely instead of competing for
   memory.
 
-The broker does not install or configure models for you. KoboldCpp and ComfyUI
-must already work independently before you add the proxy.
+The broker does not install or configure models for you. The LLM backend and
+ComfyUI must already work independently before you add the proxy.
 
 ## What the proxy does
 
@@ -28,15 +29,15 @@ SillyTavern connects to two proxy ports:
 
 | Workload | SillyTavern connects to | Proxy forwards to |
 | --- | --- | --- |
-| Chat | `http://127.0.0.1:5001` | KoboldCpp at `http://127.0.0.1:5002` |
+| Chat | `http://127.0.0.1:5001` | Selected LLM backend |
 | Images | `http://127.0.0.1:8188` | ComfyUI at `http://127.0.0.1:8189` |
 
-The proxy starts with KoboldCpp owning the GPU. When an image reaches the front
+The proxy starts with the selected LLM owning the GPU. When an image reaches the front
 of the queue, it:
 
 1. Stops starting newer chat requests.
 2. Waits for active chats and streams to finish.
-3. Unloads the KoboldCpp model and verifies that it is inactive.
+3. Asks the LLM adapter to release GPU resources and verifies the result.
 4. Sends the image workflow to ComfyUI.
 5. Leaves ComfyUI ready for any consecutive image requests.
 
@@ -44,8 +45,8 @@ When a chat reaches the front of the queue, it:
 
 1. Waits for the active image to finish.
 2. Asks ComfyUI to unload models and free memory.
-3. Reloads KoboldCpp's startup model.
-4. Verifies that the same model observed during startup is ready.
+3. Restores the LLM state captured at startup.
+4. Verifies that the original model is ready.
 5. Starts the queued chat.
 
 If no request is waiting, the current backend remains loaded. This avoids an
@@ -57,7 +58,7 @@ unnecessary unload/reload cycle after every image.
 
 | Request order | Result |
 | --- | --- |
-| Image 1 → Image 2 → Chat 1 | One switch to ComfyUI, both images run, then one switch back to KoboldCpp |
+| Image 1 → Image 2 → Chat 1 | One switch to ComfyUI, both images run, then one switch back to the LLM |
 | Image 1 → Chat 1 → Image 2 | Chat 1 runs between the images; Image 2 cannot overtake it |
 | Chat 1 → Chat 2 → Image 1 | Both chats may run concurrently; the image waits until both finish |
 | Image 1 → no new request | ComfyUI stays ready until a chat actually arrives |
@@ -65,10 +66,10 @@ unnecessary unload/reload cycle after every image.
 ## Requirements
 
 - Python 3.11 or newer
-- KoboldCpp with Model Administration enabled
-- A KoboldCpp Admin/config directory
+- KoboldCpp with Model Administration and an Admin/config directory, or Ollama
+  with exactly one loaded model
 - ComfyUI running in API-compatible mode
-- SillyTavern with KoboldCpp/KoboldAI and ComfyUI image-generation support
+- SillyTavern with an API type matching the selected LLM and ComfyUI image generation
 - All services listening on the local computer
 
 Keep the proxy and both backend Admin/API ports on loopback
@@ -82,7 +83,8 @@ Confirm that the backend ports are free and distinct:
 | Component | Default role | Default port |
 | --- | --- | --- |
 | st-vram-proxy chat listener | SillyTavern chat destination | `5001` |
-| KoboldCpp | Real chat backend | `5002` |
+| KoboldCpp | Default real chat backend | `5002` |
+| Ollama | Alternative real chat backend | `11434` |
 | st-vram-proxy image listener | SillyTavern image destination | `8188` |
 | ComfyUI | Real image backend | `8189` |
 
@@ -184,7 +186,20 @@ Windows PowerShell:
 $env:ST_PROXY_KOBOLD_ADMIN_PASSWORD = 'replace-me'
 ```
 
-### 2. Start ComfyUI
+### 2. Alternatively, configure Ollama
+
+Start Ollama and preload exactly one model:
+
+```bash
+ollama serve
+ollama run gemma3 ""
+```
+
+Verify `ollama ps` shows exactly one model. The proxy uses Ollama's lifecycle
+API to unload that model before ComfyUI work and reload it indefinitely when
+chat returns.
+
+### 3. Start ComfyUI
 
 Linux example:
 
@@ -207,7 +222,8 @@ With the virtual environment active:
 
 ```bash
 st-vram-proxy \
-  --kobold-url http://127.0.0.1:5002 \
+  --llm-backend koboldcpp \
+  --llm-url http://127.0.0.1:5002 \
   --comfy-url http://127.0.0.1:8189 \
   --chat-port 5001 \
   --image-port 8188
@@ -217,7 +233,8 @@ Windows PowerShell uses the same options:
 
 ```powershell
 st-vram-proxy `
-  --kobold-url http://127.0.0.1:5002 `
+  --llm-backend koboldcpp `
+  --llm-url http://127.0.0.1:5002 `
   --comfy-url http://127.0.0.1:8189 `
   --chat-port 5001 `
   --image-port 8188
@@ -225,9 +242,9 @@ st-vram-proxy `
 
 At startup, the proxy:
 
-1. Verifies KoboldCpp Model Administration.
+1. Verifies the selected LLM lifecycle API.
 2. Calls ComfyUI `/free` to clear leftover image models.
-3. Confirms that the KoboldCpp startup model is loaded.
+3. Captures and confirms the startup LLM model.
 4. Opens the two proxy listener ports.
 
 A healthy startup ends with a log similar to:
@@ -238,14 +255,14 @@ broker ready: chat=http://127.0.0.1:5001 image=http://127.0.0.1:8188 state=llm_r
 
 Leave this terminal running. Press `Ctrl+C` to stop the proxy cleanly. If
 ComfyUI owns the GPU at shutdown, the proxy attempts to free ComfyUI and restore
-KoboldCpp before exiting.
+the selected LLM before exiting.
 
 ## Configure SillyTavern
 
 ### Chat connection
 
 1. Open SillyTavern's API Connections panel.
-2. Select KoboldCpp/KoboldAI.
+2. Select the API type matching the configured backend.
 3. Set the server URL to `http://127.0.0.1:5001`.
 4. Connect normally.
 
@@ -256,8 +273,8 @@ KoboldCpp before exiting.
 3. Set the ComfyUI server URL to `http://127.0.0.1:8188`.
 4. Select or configure the workflow you normally use.
 
-SillyTavern should point to the proxy ports, not directly to KoboldCpp `5002`
-or ComfyUI `8189`.
+SillyTavern should point to the proxy ports, not directly to the real LLM or
+ComfyUI ports.
 
 ## Verify the setup
 
@@ -286,7 +303,8 @@ Immediately after startup, expect:
   "waiting_images": 0,
   "active_prompt_id": null,
   "last_error": null,
-  "chat_available": true
+  "chat_available": true,
+  "llm_backend": "koboldcpp"
 }
 ```
 
@@ -315,7 +333,7 @@ Send another chat message. The state progresses through:
 cleaning_comfy → reloading_llm → llm_ready
 ```
 
-The chat starts after the original KoboldCpp model is verified.
+The chat starts after the original LLM model is verified.
 
 ## Understand the status endpoint
 
@@ -325,12 +343,13 @@ The chat starts after the original KoboldCpp model is verified.
 | --- | --- |
 | `state` | Current handoff or processing stage |
 | `gpu_owner` | `llm`, `comfy`, or `null` while ownership is being changed or is unknown |
-| `active_chats` | Chat requests currently using KoboldCpp |
+| `active_chats` | Chat requests currently using the selected LLM |
 | `waiting_chats` | Chat requests still waiting in the FIFO queue |
 | `waiting_images` | Image requests still waiting in the FIFO queue |
 | `active_prompt_id` | ComfyUI prompt currently being monitored, or `null` |
 | `last_error` | Most recent controlled error or warning |
-| `chat_available` | Whether the broker can accept chat requests; a value of `true` does not mean KoboldCpp is already loaded |
+| `chat_available` | Whether the broker can accept chat requests; `true` does not mean the LLM is already loaded |
+| `llm_backend` | Selected lifecycle adapter, such as `koboldcpp` or `ollama` |
 
 `waiting_chats` and `waiting_images` count queued work. The request currently
 being activated or processed is not included in those counters.
@@ -341,26 +360,26 @@ being activated or processed is not included in those counters.
 | --- | --- |
 | `initializing` | Coordinator is starting |
 | `cleaning_comfy` | Proxy is asking ComfyUI to free models and memory |
-| `verifying_llm` | Proxy is checking the startup KoboldCpp model |
-| `llm_ready` | KoboldCpp owns the GPU and chat can start |
+| `verifying_llm` | Proxy is checking the startup LLM model |
+| `llm_ready` | The selected LLM owns the GPU and chat can start |
 | `draining_llm` | Newer work is queued while active chats finish |
-| `unloading_llm` | KoboldCpp is unloading its model |
+| `unloading_llm` | The LLM adapter is releasing GPU resources |
 | `comfy_ready` | ComfyUI owns the GPU and is idle between image jobs |
 | `image_active` | A ComfyUI prompt is running |
-| `reloading_llm` | KoboldCpp's startup model is being restored |
+| `reloading_llm` | The startup LLM state is being restored |
 | `error` | GPU ownership or backend readiness could not be verified |
 | `shutting_down` | Proxy is stopping and restoring a safe state |
 
 ## Everyday operation
 
-- Start KoboldCpp and ComfyUI before the proxy.
+- Start the selected LLM backend and ComfyUI before the proxy.
 - Keep the proxy running while SillyTavern is in use.
 - A chat waiting behind images is normal.
 - An image waiting for a streaming chat is normal.
 - Consecutive images reuse the ComfyUI ownership period.
 - Consecutive chats can run concurrently until an image reaches the front of
   the queue.
-- Stop the proxy with `Ctrl+C` so it can restore KoboldCpp safely.
+- Stop the proxy with `Ctrl+C` so it can restore the LLM safely.
 - Use `/broker/status` before restarting backends during a handoff.
 
 ## Configuration reference
@@ -374,22 +393,30 @@ environment.
 | `--listen-host` | `ST_PROXY_LISTEN_HOST` | `127.0.0.1` | Address used by both proxy listeners |
 | `--chat-port` | `ST_PROXY_CHAT_PORT` | `5001` | SillyTavern chat destination |
 | `--image-port` | `ST_PROXY_IMAGE_PORT` | `8188` | SillyTavern image destination |
-| `--kobold-url` | `ST_PROXY_KOBOLD_URL` | `http://127.0.0.1:5002` | Real KoboldCpp origin |
+| `--llm-backend` | `ST_PROXY_LLM_BACKEND` | `koboldcpp` | LLM lifecycle adapter |
+| `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific | Real LLM origin |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` | Real ComfyUI origin |
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset | KoboldCpp Admin bearer password |
 | `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `600` seconds | General upstream request timeout |
 | `--image-timeout` | `ST_PROXY_IMAGE_TIMEOUT` | `1800` seconds | Maximum monitored image-job duration |
 | `--chat-drain-timeout` | `ST_PROXY_CHAT_DRAIN_TIMEOUT` | `1800` seconds | Maximum wait for active chats to finish |
-| `--unload-timeout` | `ST_PROXY_UNLOAD_TIMEOUT` | `180` seconds | Maximum KoboldCpp unload/verification time |
-| `--reload-timeout` | `ST_PROXY_RELOAD_TIMEOUT` | `600` seconds | Maximum KoboldCpp reload/verification time |
+| `--unload-timeout` | `ST_PROXY_UNLOAD_TIMEOUT` | `180` seconds | Maximum LLM release/verification time |
+| `--reload-timeout` | `ST_PROXY_RELOAD_TIMEOUT` | `600` seconds | Maximum LLM restore/verification time |
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds | Maximum ComfyUI cleanup time |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds | Backend state polling interval |
+| `--check-backend` | — | disabled | Check LLM control and readiness, then exit |
+| `--backend-check-timeout` | `ST_PROXY_BACKEND_CHECK_TIMEOUT` | `2` seconds | Readiness-command timeout |
 | `--log-level` | `ST_PROXY_LOG_LEVEL` | `INFO` | Python logging level |
+
+KoboldCpp defaults to `http://127.0.0.1:5002`; Ollama defaults to
+`http://127.0.0.1:11434`. `--kobold-url` and `ST_PROXY_KOBOLD_URL` remain
+compatibility aliases for the generic LLM origin.
 
 Example environment-only configuration on Linux:
 
 ```bash
-export ST_PROXY_KOBOLD_URL=http://127.0.0.1:5002
+export ST_PROXY_LLM_BACKEND=koboldcpp
+export ST_PROXY_LLM_URL=http://127.0.0.1:5002
 export ST_PROXY_COMFY_URL=http://127.0.0.1:8189
 export ST_PROXY_CHAT_PORT=5001
 export ST_PROXY_IMAGE_PORT=8188
@@ -423,7 +450,7 @@ newer request never jumps ahead merely because its backend is already loaded.
 
 If `active_chats` remains nonzero, a long-running or disconnected stream may
 still be draining upstream. The proxy deliberately waits for upstream
-generation to finish before unloading KoboldCpp.
+generation to finish before asking the LLM adapter to release the GPU.
 
 ### Startup reports Model Administration errors
 
@@ -441,6 +468,20 @@ Verify:
 3. The Admin password matches `ST_PROXY_KOBOLD_ADMIN_PASSWORD`.
 4. KoboldCpp exposes both `unload_model` and `initial_model`.
 5. You restarted KoboldCpp after changing its Admin configuration.
+
+This section applies only to the `koboldcpp` adapter.
+
+### Ollama startup reports a ready-state snapshot error
+
+The `ollama` adapter requires exactly one model in `/api/ps`. Run:
+
+```bash
+ollama ps
+```
+
+Load the intended model if none is present, or stop extra models before
+restarting the proxy. The proxy deliberately refuses to guess which of several
+models should be restored.
 
 ### Status remains `error`
 
@@ -474,7 +515,7 @@ startup. Check that:
 ### ComfyUI image job times out
 
 The proxy asks ComfyUI to interrupt the job, records the error, frees ComfyUI,
-and restores KoboldCpp.
+and restores the selected LLM.
 
 Check the ComfyUI console for workflow or node errors. Increase
 `--image-timeout` only if the workflow is healthy but legitimately takes
@@ -482,8 +523,8 @@ longer.
 
 ### ComfyUI cleanup fails
 
-The proxy records the cleanup failure and still attempts to restore KoboldCpp.
-Check ComfyUI's `/free` support and console output. If KoboldCpp cannot reload,
+The proxy records the cleanup failure and still attempts to restore the LLM.
+Check ComfyUI's `/free` support and console output. If the LLM cannot reload,
 the broker enters `error` and returns HTTP 503 for queued chat.
 
 ### HTTP 502 versus HTTP 503
@@ -518,12 +559,12 @@ Recheck both SillyTavern URLs:
 - Chat must use the proxy chat port.
 - Images must use the proxy image port.
 
-Do not configure SillyTavern with the real KoboldCpp or ComfyUI ports.
+Do not configure SillyTavern with the real LLM or ComfyUI ports.
 
 ## Security and privacy
 
 - Loopback is the safe default.
-- Do not expose the KoboldCpp Admin API publicly.
+- Do not expose an LLM lifecycle or Admin API publicly.
 - Do not expose ComfyUI or the proxy directly to an untrusted network.
 - Store the Admin password in `ST_PROXY_KOBOLD_ADMIN_PASSWORD`.
 - Avoid putting passwords on command lines where shell history or process
@@ -535,15 +576,17 @@ Do not configure SillyTavern with the real KoboldCpp or ComfyUI ports.
 ## Optional local stack supervisor
 
 The repository includes `st-stack.zsh`, a Linux/Zsh supervisor tailored to the
-repository owner's local multi-service setup. It can supervise KoboldCpp,
-SillyTavern, PocketTTS, AllTalk, and the proxy. It does not start ComfyUI.
+repository owner's local multi-service setup. It can supervise a configured
+LLM, SillyTavern, PocketTTS, AllTalk, and the proxy. It does not start ComfyUI.
 
 This script is not a portable default installation:
 
-- Its application directories and launch commands are constants near the top
-  of the script and must match your computer.
+- Its non-LLM application directories remain constants near the top of the
+  script and must match your computer.
+- Configure the LLM with `ST_PROXY_LLM_BACKEND`, `ST_PROXY_LLM_URL`,
+  `ST_STACK_LLM_DIR`, and `ST_STACK_LLM_COMMAND`.
 - Its default port layout differs from the standalone examples in this guide:
-  it expects the real KoboldCpp and ComfyUI origins on `5001` and `8188`, and
+  its KoboldCpp profile expects the real LLM and ComfyUI origins on `5001` and `8188`, and
   exposes the proxy on `5002` and `8189`.
 - It requires Zsh and Linux process-management tools.
 
@@ -573,7 +616,7 @@ commands, ports, and shutdown behavior.
 Start order:
 
 ```text
-1. KoboldCpp
+1. Selected LLM backend
 2. ComfyUI
 3. st-vram-proxy
 4. SillyTavern connection
@@ -583,7 +626,7 @@ Default URLs:
 
 ```text
 SillyTavern chat:   http://127.0.0.1:5001
-KoboldCpp backend:  http://127.0.0.1:5002
+Default LLM backend: http://127.0.0.1:5002
 SillyTavern images: http://127.0.0.1:8188
 ComfyUI backend:    http://127.0.0.1:8189
 Broker status:      http://127.0.0.1:5001/broker/status
@@ -592,7 +635,7 @@ Broker status:      http://127.0.0.1:5001/broker/status
 Healthy idle states:
 
 ```text
-llm_ready   — KoboldCpp owns the GPU
+llm_ready   — the selected LLM owns the GPU
 comfy_ready — ComfyUI owns the GPU
 ```
 

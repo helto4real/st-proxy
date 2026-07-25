@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import InitVar, dataclass, field, replace
 from urllib.parse import urlsplit, urlunsplit
 
 from .errors import ConfigurationError
@@ -64,7 +64,9 @@ class BrokerConfig:
     listen_host: str = "127.0.0.1"
     chat_port: int = 5001
     image_port: int = 8188
-    kobold_url: str = "http://127.0.0.1:5002"
+    llm_backend: str = "koboldcpp"
+    llm_url: str = ""
+    kobold_url: InitVar[str | None] = None
     comfy_url: str = "http://127.0.0.1:8189"
     kobold_admin_password: str | None = None
     request_timeout: float = 600.0
@@ -77,8 +79,16 @@ class BrokerConfig:
     test_mode: bool = False
     test_registry: TestEndpointRegistry | None = field(default=None, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "kobold_url", normalize_origin(self.kobold_url))
+    def __post_init__(self, kobold_url: str | None) -> None:
+        if not self.llm_backend:
+            raise ConfigurationError("llm_backend cannot be empty")
+        from .llm import backend_default_origin
+
+        if kobold_url and self.llm_url:
+            if normalize_origin(kobold_url) != normalize_origin(self.llm_url):
+                raise ConfigurationError("llm_url and kobold_url cannot disagree")
+        llm_url = kobold_url or self.llm_url or backend_default_origin(self.llm_backend)
+        object.__setattr__(self, "llm_url", normalize_origin(llm_url))
         object.__setattr__(self, "comfy_url", normalize_origin(self.comfy_url))
         if not 0 <= self.chat_port <= 65535 or not 0 <= self.image_port <= 65535:
             raise ConfigurationError("listen ports must be between 0 and 65535")
@@ -101,7 +111,7 @@ class BrokerConfig:
                 raise ConfigurationError("test mode requires dynamically allocated broker ports")
             if self.test_registry is None:
                 raise ConfigurationError("test mode requires a process-local endpoint registry")
-            for origin in (self.kobold_url, self.comfy_url):
+            for origin in (self.llm_url, self.comfy_url):
                 if not self.test_registry.contains(origin):
                     raise ConfigurationError("test mode rejected an unregistered upstream endpoint")
 
@@ -109,15 +119,21 @@ class BrokerConfig:
     def for_test(
         cls,
         *,
-        kobold_url: str,
+        kobold_url: str | None = None,
+        llm_url: str | None = None,
+        llm_backend: str = "koboldcpp",
         comfy_url: str,
         registry: TestEndpointRegistry,
         **overrides: object,
     ) -> BrokerConfig:
+        selected_llm_url = llm_url or kobold_url
+        if selected_llm_url is None:
+            raise ConfigurationError("for_test requires llm_url")
         config = cls(
             chat_port=0,
             image_port=0,
-            kobold_url=kobold_url,
+            llm_backend=llm_backend,
+            llm_url=selected_llm_url,
             comfy_url=comfy_url,
             test_mode=True,
             test_registry=registry,
