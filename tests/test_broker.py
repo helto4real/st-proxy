@@ -69,7 +69,18 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 self.service.coordinator is not None
                 and self.service.coordinator.status()["state"] == "llm_ready"
+                and not self.service.coordinator.status()["waiting_chats"]
                 and not self.service.coordinator.status()["waiting_images"]
+            )
+        )
+
+    async def wait_comfy_ready(self) -> None:
+        await wait_until(
+            lambda: (
+                self.service.coordinator is not None
+                and self.service.coordinator.status()["state"] == "comfy_ready"
+                and not self.service.coordinator.status()["waiting_images"]
+                and self.service.coordinator.status()["active_prompt_id"] is None
             )
         )
 
@@ -77,6 +88,16 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         async with await self.post_prompt() as response:
             self.assertEqual(response.status, 200)
             self.assertEqual((await response.json())["prompt_id"], "synthetic-1")
+        await self.wait_comfy_ready()
+        self.assertEqual(self.kobold.admin_calls, ["unload_model"])
+        self.assertEqual(self.comfy.free_calls, 1)
+        status = await self.status()
+        self.assertEqual(status["state"], "comfy_ready")
+        self.assertEqual(status["gpu_owner"], "comfy")
+        self.assertTrue(status["chat_available"])
+
+        async with self.client.post(f"{self.chat_url}/api/v1/generate", json={}) as chat:
+            self.assertEqual(chat.status, 200)
         await self.wait_ready()
         self.assertEqual(self.kobold.admin_calls, ["unload_model", "initial_model"])
         self.assertEqual(self.comfy.free_calls, 2)
@@ -101,6 +122,9 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(chat.status, 200)
             image = await self.post_prompt()
             image.close()
+            await self.wait_comfy_ready()
+            async with self.client.post(f"{self.chat_url}/api/v1/generate", json={}) as chat:
+                self.assertEqual(chat.status, 200)
             await self.wait_ready()
 
         logs = "\n".join(captured.output)
@@ -184,7 +208,7 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         chat_response.close()
         image_response = await image_task
         image_response.close()
-        await self.wait_ready()
+        await self.wait_comfy_ready()
         self.assertLess(
             self.kobold.events.index("chat_finished"), self.kobold.events.index("unload_model")
         )
@@ -228,23 +252,85 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         await chat_response.read()
         chat_response.close()
 
-    async def test_concurrent_image_requests_are_serialized(self) -> None:
+    async def test_concurrent_image_requests_are_fifo_batched_before_chat(self) -> None:
         self.comfy.auto_complete = False
         first = await self.post_prompt()
         first.close()
         second_task = asyncio.create_task(self.post_prompt())
-        await asyncio.sleep(0.03)
+        await wait_until(
+            lambda: (
+                self.service.coordinator is not None
+                and self.service.coordinator.status()["waiting_images"] == 1
+            )
+        )
+        chat_task = asyncio.create_task(
+            self.client.post(f"{self.chat_url}/api/v1/generate", json={"prompt": "synthetic"})
+        )
+        await wait_until(
+            lambda: (
+                self.service.coordinator is not None
+                and self.service.coordinator.status()["waiting_chats"] == 1
+            )
+        )
         self.assertEqual(self.comfy.prompt_calls, ["synthetic-1"])
         self.comfy.completion["synthetic-1"].set()
         second = await second_task
         self.assertEqual((await second.json())["prompt_id"], "synthetic-2")
         second.close()
+        self.assertEqual(self.kobold.admin_calls, ["unload_model"])
+        self.assertEqual(self.kobold.chat_requests, 0)
         self.comfy.completion["synthetic-2"].set()
+        chat = await chat_task
+        self.assertEqual(chat.status, 200)
+        chat.close()
         await self.wait_ready()
         self.assertEqual(
             self.kobold.admin_calls,
-            ["unload_model", "initial_model", "unload_model", "initial_model"],
+            ["unload_model", "initial_model"],
         )
+        self.assertEqual(self.comfy.free_calls, 2)
+
+    async def test_fifo_does_not_batch_images_across_a_queued_chat(self) -> None:
+        self.comfy.auto_complete = False
+        first = await self.post_prompt()
+        first.close()
+        chat_task = asyncio.create_task(
+            self.client.post(f"{self.chat_url}/api/extra/generate/stream")
+        )
+        await wait_until(
+            lambda: (
+                self.service.coordinator is not None
+                and self.service.coordinator.status()["waiting_chats"] == 1
+            )
+        )
+        second_task = asyncio.create_task(self.post_prompt())
+        await wait_until(
+            lambda: (
+                self.service.coordinator is not None
+                and self.service.coordinator.status()["waiting_images"] == 1
+            )
+        )
+
+        self.kobold.hold_chat = True
+        self.comfy.completion["synthetic-1"].set()
+        chat = await chat_task
+        await self.kobold.chat_started.wait()
+        self.assertEqual(await chat.content.readuntil(b"\n\n"), b"data: synthetic-one\n\n")
+        self.assertEqual(self.comfy.prompt_calls, ["synthetic-1"])
+        self.assertEqual(self.kobold.admin_calls, ["unload_model", "initial_model"])
+
+        self.kobold.chat_release.set()
+        await chat.read()
+        chat.close()
+        second = await second_task
+        self.assertEqual((await second.json())["prompt_id"], "synthetic-2")
+        second.close()
+        self.assertEqual(
+            self.kobold.admin_calls,
+            ["unload_model", "initial_model", "unload_model"],
+        )
+        self.comfy.completion["synthetic-2"].set()
+        await self.wait_comfy_ready()
 
     async def test_image_generation_failure_restores_kobold(self) -> None:
         self.comfy.fail_next_job = True
@@ -284,7 +370,7 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         second = await self.post_prompt()
         self.assertEqual(second.status, 200)
         second.close()
-        await self.wait_ready()
+        await self.wait_comfy_ready()
 
     async def test_admin_rejection_is_not_treated_as_a_successful_unload(self) -> None:
         self.kobold.admin_enabled = False
@@ -308,20 +394,46 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         response = await self.post_prompt()
         self.assertEqual(response.status, 200)
         response.close()
+        await self.wait_comfy_ready()
+        async with self.client.post(f"{self.chat_url}/api/v1/generate", json={}) as chat:
+            self.assertEqual(chat.status, 503)
         await wait_until(
             lambda: (
                 self.service.coordinator is not None
                 and self.service.coordinator.status()["state"] == "error"
             )
         )
+        self.assertIn("initial_model", self.kobold.admin_calls)
+
+    async def test_reload_requires_the_same_model_seen_at_startup(self) -> None:
+        await self.service.stop()
+        self.config = BrokerConfig.for_test(
+            kobold_url=self.kobold_server.url,
+            comfy_url=self.comfy_server.url,
+            registry=self.registry,
+            reload_timeout=0.05,
+        )
+        self.service = BrokerService(self.config)
+        await self.service.start()
+        self.kobold.reload_model = "unexpected-model.gguf"
+
+        response = await self.post_prompt()
+        response.close()
+        await self.wait_comfy_ready()
         async with self.client.post(f"{self.chat_url}/api/v1/generate", json={}) as chat:
             self.assertEqual(chat.status, 503)
-        self.assertIn("initial_model", self.kobold.admin_calls)
+
+        status = await self.status()
+        self.assertEqual(status["state"], "error")
+        self.assertIn("confirmation of loaded", status["last_error"])
 
     async def test_comfy_cleanup_failure_does_not_block_restore(self) -> None:
         self.comfy.cleanup_failures = 1
         response = await self.post_prompt()
         response.close()
+        await self.wait_comfy_ready()
+        async with self.client.post(f"{self.chat_url}/api/v1/generate", json={}) as chat:
+            self.assertEqual(chat.status, 200)
         await self.wait_ready()
         self.assertEqual(self.kobold.model, "synthetic-model.gguf")
         self.assertIn("model cleanup", (await self.status())["last_error"])
@@ -337,7 +449,7 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.kobold.chat_release.set()
         image_response = await image_task
         image_response.close()
-        await self.wait_ready()
+        await self.wait_comfy_ready()
 
     async def test_shutdown_interrupts_active_handoff_and_restores(self) -> None:
         self.comfy.auto_complete = False
@@ -361,6 +473,9 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         await self.service.start()
         response = await self.post_prompt()
         response.close()
+        await self.wait_comfy_ready()
+        async with self.client.post(f"{self.chat_url}/api/v1/generate", json={}) as chat:
+            self.assertEqual(chat.status, 200)
         await self.wait_ready()
         self.assertEqual(self.kobold.admin_authorization, ["Bearer synthetic-secret"] * 2)
         self.assertNotIn("synthetic-secret", str(await self.status()))
@@ -402,7 +517,7 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         with patch("builtins.open", guarded_open):
             response = await self.post_prompt()
             response.close()
-            await self.wait_ready()
+            await self.wait_comfy_ready()
         self.assertEqual(list(allowed.iterdir()), [])
 
 

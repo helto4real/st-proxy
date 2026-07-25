@@ -24,6 +24,7 @@ class KoboldClient:
     def __init__(self, session: ClientSession, config: BrokerConfig) -> None:
         self._session = session
         self._config = config
+        self._initial_model: str | None = None
 
     @property
     def _admin_headers(self) -> dict[str, str]:
@@ -132,7 +133,13 @@ class KoboldClient:
             )
         LOG.info("KoboldCpp model administration confirmed: admin_level=%s", admin_level)
 
-    async def _wait_for_model(self, *, loaded: bool, timeout_seconds: float) -> None:
+    async def _wait_for_model(
+        self,
+        *,
+        loaded: bool,
+        timeout_seconds: float,
+        expected_model: str | None = None,
+    ) -> str | None:
         started = time.monotonic()
         deadline = time.monotonic() + timeout_seconds
         expected_state = "loaded" if loaded else "unloaded"
@@ -146,13 +153,14 @@ class KoboldClient:
             model = await self._model_name()
             version_ready = await self._version_ready()
             is_loaded = bool(model) and model.lower() not in inactive_names
-            if version_ready and is_loaded is loaded:
+            expected_model_ready = not loaded or expected_model is None or model == expected_model
+            if version_ready and is_loaded is loaded and expected_model_ready:
                 LOG.info(
                     "KoboldCpp model state confirmed: state=%s duration=%.3fs",
                     expected_state,
                     time.monotonic() - started,
                 )
-                return
+                return model
             await asyncio.sleep(self._config.poll_interval)
         raise _safe_error("KoboldCpp", f"confirmation of {expected_state}", "timed out")
 
@@ -161,11 +169,19 @@ class KoboldClient:
         await self._wait_for_model(loaded=False, timeout_seconds=self._config.unload_timeout)
 
     async def ensure_loaded(self) -> None:
-        await self._wait_for_model(loaded=True, timeout_seconds=self._config.reload_timeout)
+        model = await self._wait_for_model(
+            loaded=True,
+            timeout_seconds=self._config.reload_timeout,
+        )
+        self._initial_model = model
 
     async def reload_initial(self) -> None:
         await self._reload_config("initial_model", self._config.reload_timeout)
-        await self._wait_for_model(loaded=True, timeout_seconds=self._config.reload_timeout)
+        await self._wait_for_model(
+            loaded=True,
+            timeout_seconds=self._config.reload_timeout,
+            expected_model=self._initial_model,
+        )
 
 
 @dataclass(slots=True)

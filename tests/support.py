@@ -35,6 +35,7 @@ class DynamicServer:
 @dataclass
 class MockKobold:
     model: str = "synthetic-model.gguf"
+    reload_model: str = "synthetic-model.gguf"
     admin_enabled: bool = True
     unload_failures: int = 0
     reload_failures: int = 0
@@ -76,7 +77,7 @@ class MockKobold:
             if self.reload_failures:
                 self.reload_failures -= 1
                 return web.json_response({"error": "synthetic reload failure"}, status=500)
-            self.model = "synthetic-model.gguf"
+            self.model = self.reload_model
         return web.json_response({"success": True})
 
     async def get_model(self, _request: web.Request) -> web.Response:

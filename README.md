@@ -9,11 +9,19 @@ SillyTavern chat  -> 127.0.0.1:5001 -> broker -> KoboldCpp 127.0.0.1:5002
 SillyTavern image -> 127.0.0.1:8188 -> broker -> ComfyUI   127.0.0.1:8189
 ```
 
-For every ComfyUI `POST /prompt`, the broker stops admitting new chat requests,
-drains active responses (including streams), unloads KoboldCpp, confirms its
-model endpoint reports an inactive model, submits and monitors the ComfyUI job,
-calls ComfyUI `/free`, reloads KoboldCpp's startup model, verifies readiness,
-and then releases queued chat requests. Image handoffs are serialized.
+Chat and ComfyUI `POST /prompt` requests enter one FIFO queue. The broker changes
+GPU ownership only when the request at the head of that queue needs the other
+backend. When switching to ComfyUI, it drains active chat responses (including
+streams), unloads KoboldCpp, and confirms its model endpoint reports an inactive
+model. Consecutive image jobs then run serially without reloading KoboldCpp
+between them.
+
+When an LLM request reaches the head of the queue, the broker calls ComfyUI
+`/free`, reloads KoboldCpp's startup model, verifies that the same model seen at
+startup is ready, and releases the chat request. If the queue becomes empty, the
+current backend keeps the GPU: ComfyUI remains ready after an image until an LLM
+request actually needs the GPU, and KoboldCpp remains ready until an image does.
+No request can overtake a request for the other backend.
 
 When the broker starts, it first calls ComfyUI `/free` and confirms that
 KoboldCpp has a loaded model before accepting chat requests. This clears VRAM
@@ -142,6 +150,7 @@ Example idle response:
 ```json
 {
   "state": "llm_ready",
+  "gpu_owner": "llm",
   "active_chats": 0,
   "waiting_chats": 0,
   "waiting_images": 0,
@@ -216,9 +225,10 @@ started above and will unload/reload real models:
 2. Start the broker and confirm `/broker/status` says `llm_ready`.
 3. Start a SillyTavern chat and let it finish.
 4. Request one image from SillyTavern.
-5. Watch `/broker/status`; it should progress through drain, unload, image,
-   cleanup, reload, and back to `llm_ready`.
-6. Confirm the next SillyTavern chat works without reconnecting.
+5. Watch `/broker/status`; it should progress through drain, unload, and image,
+   then remain at `comfy_ready` with `gpu_owner` set to `comfy`.
+6. Start the next SillyTavern chat. The status should progress through cleanup
+   and reload, return to `llm_ready`, and complete without reconnecting.
 
 Only perform this procedure when you explicitly intend to contact and control
 those real local processes.
