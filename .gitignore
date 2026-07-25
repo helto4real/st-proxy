@@ -1,8 +1,38 @@
+# Python bytecode and tool caches
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.pyright/
+.tox/
+.nox/
+
+# Coverage reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Virtual environments and local configuration
 .venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Packaging output
 dist/
 build/
 *.egg-info/
+.eggs/
+
+# Local JavaScript dependencies and downloaded model data
+node_modules/
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
