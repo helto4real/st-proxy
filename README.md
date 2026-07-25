@@ -4,6 +4,9 @@
 KoboldCpp or ComfyUI. SillyTavern talks to the broker on two ports, while the
 real applications listen on different loopback ports behind it.
 
+New to the project? Start with the illustrated
+[user guide](docs/USER_GUIDE.md).
+
 ```text
 SillyTavern chat  -> 127.0.0.1:5001 -> broker -> KoboldCpp 127.0.0.1:5002
 SillyTavern image -> 127.0.0.1:8188 -> broker -> ComfyUI   127.0.0.1:8189
