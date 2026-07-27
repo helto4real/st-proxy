@@ -16,6 +16,8 @@ typeset -gr PROXY_COMMAND="./.venv/bin/st-vram-proxy"
 typeset -gr PROXY_PATH="${SCRIPT_DIR}/.venv/bin/st-vram-proxy"
 typeset -gr COMFY_URL="${ST_PROXY_COMFY_URL:-http://127.0.0.1:8188}"
 
+typeset -gi LLM_COMMAND_EXPLICIT=${+ST_STACK_LLM_COMMAND}
+typeset -g KOBOLD_EXECUTABLE="${ST_STACK_KOBOLD_EXECUTABLE:-./koboldcpp-linux-x64}"
 typeset -g LLM_BACKEND="${ST_PROXY_LLM_BACKEND:-koboldcpp}"
 typeset -g LLM_LABEL=""
 typeset -g LLM_DEFAULT_URL=""
@@ -26,7 +28,7 @@ case "${LLM_BACKEND}" in
         LLM_LABEL="KoboldCpp"
         LLM_DEFAULT_URL="http://127.0.0.1:5001"
         LLM_DEFAULT_DIR="${HOME}/git/cobolcpp"
-        LLM_DEFAULT_COMMAND="./start_HQ.sh"
+        LLM_DEFAULT_COMMAND="${KOBOLD_EXECUTABLE}"
         ;;
     ollama)
         LLM_LABEL="Ollama"
@@ -46,6 +48,10 @@ typeset -g LLM_COMMAND_NAME=""
 if (( ${#LLM_COMMAND} )); then
     LLM_COMMAND_NAME=${LLM_COMMAND[1]:t:l}
 fi
+typeset -g KOBOLD_CONFIG_DIR="${ST_STACK_KOBOLD_CONFIG_DIR:-${LLM_DIR}/models}"
+typeset -g KOBOLD_CONFIG_SETTING="${ST_STACK_KOBOLD_CONFIG:-}"
+typeset -g KOBOLD_SELECTED_CONFIG=""
+typeset -ga KOBOLD_CONFIG_FILES=()
 
 typeset -gr RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 typeset -gr RUNTIME_DIR="${RUNTIME_BASE}/st-stack-${UID}"
@@ -132,6 +138,114 @@ parse_args() {
         log "ST_PROXY_LLM_URL must include http(s), a host and an explicit port"
         return 2
     fi
+}
+
+kobold_config_display_name() {
+    local config=$1
+    local relative=${config#${KOBOLD_CONFIG_DIR}/}
+
+    REPLY=${relative%.kcpps}
+}
+
+discover_kobold_configs() {
+    if [[ ! -d "${KOBOLD_CONFIG_DIR}" ]]; then
+        log "KoboldCpp config directory does not exist: ${KOBOLD_CONFIG_DIR}"
+        return 1
+    fi
+    if [[ ! -r "${KOBOLD_CONFIG_DIR}" ]]; then
+        log "KoboldCpp config directory is not readable: ${KOBOLD_CONFIG_DIR}"
+        return 1
+    fi
+
+    KOBOLD_CONFIG_DIR=${KOBOLD_CONFIG_DIR:A}
+    KOBOLD_CONFIG_FILES=("${KOBOLD_CONFIG_DIR}"/**/*.kcpps(N.))
+    if (( ${#KOBOLD_CONFIG_FILES} == 0 )); then
+        log "no KoboldCpp .kcpps configs found under ${KOBOLD_CONFIG_DIR}"
+        return 1
+    fi
+}
+
+resolve_configured_kobold_config() {
+    local candidate
+
+    if [[ "${KOBOLD_CONFIG_SETTING}" == /* ]]; then
+        candidate=${KOBOLD_CONFIG_SETTING}
+    else
+        candidate="${KOBOLD_CONFIG_DIR}/${KOBOLD_CONFIG_SETTING}"
+    fi
+    [[ "${candidate}" == *.kcpps ]] || candidate+=".kcpps"
+    candidate=${candidate:A}
+
+    if [[ "${candidate}" != "${KOBOLD_CONFIG_DIR}"/* ]]; then
+        log "ST_STACK_KOBOLD_CONFIG must select a config under ${KOBOLD_CONFIG_DIR}"
+        return 1
+    fi
+    if [[ ! -f "${candidate}" || ! -r "${candidate}" ]]; then
+        log "configured KoboldCpp config is not a readable file: ${candidate}"
+        return 1
+    fi
+
+    KOBOLD_SELECTED_CONFIG=${candidate}
+}
+
+prompt_for_kobold_config() {
+    local choice
+    local config
+    local index=1
+
+    log "available KoboldCpp configurations:"
+    for config in "${KOBOLD_CONFIG_FILES[@]}"; do
+        kobold_config_display_name "${config}"
+        print -ru2 -- "  ${index}) ${REPLY}"
+        (( index++ ))
+    done
+
+    while true; do
+        print -nru2 -- "Select configuration [1-${#KOBOLD_CONFIG_FILES}]: "
+        if ! IFS= read -r choice; then
+            log "no KoboldCpp config selected; set ST_STACK_KOBOLD_CONFIG for non-interactive startup"
+            return 1
+        fi
+        if [[ "${choice}" == <-> ]] &&
+            (( choice >= 1 && choice <= ${#KOBOLD_CONFIG_FILES} )); then
+            KOBOLD_SELECTED_CONFIG=${KOBOLD_CONFIG_FILES[choice]}
+            return 0
+        fi
+        log "enter a number between 1 and ${#KOBOLD_CONFIG_FILES}"
+    done
+}
+
+configure_kobold_command() {
+    local executable_path
+
+    (( LLM_COMMAND_EXPLICIT )) && return 0
+    discover_kobold_configs || return 1
+
+    if [[ -n "${KOBOLD_CONFIG_SETTING}" ]]; then
+        resolve_configured_kobold_config || return 1
+    else
+        prompt_for_kobold_config || return 1
+    fi
+
+    if [[ "${KOBOLD_EXECUTABLE}" == */* ]]; then
+        if [[ "${KOBOLD_EXECUTABLE}" == /* ]]; then
+            executable_path=${KOBOLD_EXECUTABLE}
+        else
+            executable_path="${LLM_DIR}/${KOBOLD_EXECUTABLE}"
+        fi
+        if [[ ! -x "${executable_path}" ]]; then
+            log "KoboldCpp executable is not executable: ${executable_path}"
+            return 1
+        fi
+    elif ! command -v "${KOBOLD_EXECUTABLE}" >/dev/null 2>&1; then
+        log "KoboldCpp executable was not found in PATH: ${KOBOLD_EXECUTABLE}"
+        return 1
+    fi
+
+    LLM_COMMAND=("${KOBOLD_EXECUTABLE}" --config "${KOBOLD_SELECTED_CONFIG}")
+    LLM_COMMAND_NAME=${KOBOLD_EXECUTABLE:t:l}
+    kobold_config_display_name "${KOBOLD_SELECTED_CONFIG}"
+    log "selected KoboldCpp config: ${REPLY}"
 }
 
 prepare_runtime_dir() {
@@ -429,6 +543,9 @@ ensure_service_started() {
 
     case "${service}" in
         llm)
+            if [[ "${LLM_BACKEND}" == koboldcpp ]]; then
+                configure_kobold_command || return 1
+            fi
             log "starting ${LLM_LABEL} in ${LLM_DIR}"
             launch_in_directory llm "${LLM_DIR}" 1 "${LLM_COMMAND[@]}"
             ;;

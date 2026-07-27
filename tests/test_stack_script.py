@@ -76,6 +76,9 @@ while :; do sleep 1; done
 """
 
         _write_executable(self.llm_dir / "start_HQ.sh", shell_service("llm"))
+        _write_executable(
+            self.llm_dir / "koboldcpp-linux-x64", shell_service("llm")
+        )
 
         _write_executable(self.silly_dir / "start.sh", shell_service("silly"))
 
@@ -193,15 +196,23 @@ esac
 """
         _write_executable(self.bin_dir / "curl", fake_curl)
 
-    def start(self, *args: str) -> subprocess.Popen[str]:
-        return subprocess.Popen(
+    def start(
+        self, *args: str, stdin_data: str | None = None
+    ) -> subprocess.Popen[str]:
+        process = subprocess.Popen(
             ["zsh", str(self.script), *args],
             cwd=self.outside,
             env=self.env,
+            stdin=subprocess.PIPE if stdin_data is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         )
+        if stdin_data is not None:
+            assert process.stdin is not None
+            process.stdin.write(stdin_data)
+            process.stdin.flush()
+        return process
 
     def read_events(self) -> list[tuple[str, Path, int]]:
         if not self.events.exists():
@@ -282,6 +293,90 @@ def test_start_order_working_directories_and_logging(
         "alltalk-child-log",
     ):
         assert (child_log in output) is show_logs
+
+
+def test_koboldcpp_config_setting_accepts_relative_name_without_extension(
+    fake_stack: FakeStack,
+) -> None:
+    config = (
+        fake_stack.llm_dir
+        / "models"
+        / "roleplay"
+        / "gemma4"
+        / "primary config.kcpps"
+    )
+    config.parent.mkdir(parents=True)
+    config.write_text("{}\n", encoding="utf-8")
+    fake_stack.env.pop("ST_STACK_LLM_COMMAND")
+    fake_stack.env["ST_STACK_KOBOLD_CONFIG"] = "roleplay/gemma4/primary config"
+
+    supervisor = fake_stack.start()
+    events = fake_stack.wait_for_services(
+        supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
+    )
+    llm_pid = next(pid for service, _cwd, pid in events if service == "llm")
+    llm_command = (
+        Path(f"/proc/{llm_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    )
+    supervisor.send_signal(signal.SIGINT)
+    output = supervisor.communicate(timeout=12)[0]
+
+    assert supervisor.returncode == 130
+    assert f"--config {config}" in llm_command
+    assert "selected KoboldCpp config: roleplay/gemma4/primary config" in output
+    assert "Select configuration" not in output
+
+
+def test_koboldcpp_prompts_with_sorted_names_without_extensions(
+    fake_stack: FakeStack,
+) -> None:
+    first = fake_stack.llm_dir / "models" / "general" / "alpha.kcpps"
+    selected = (
+        fake_stack.llm_dir
+        / "models"
+        / "roleplay"
+        / "gemma4"
+        / "primary config.kcpps"
+    )
+    for config in (selected, first):
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("{}\n", encoding="utf-8")
+    fake_stack.env.pop("ST_STACK_LLM_COMMAND")
+    fake_stack.env.pop("ST_STACK_KOBOLD_CONFIG", None)
+
+    supervisor = fake_stack.start(stdin_data="0\nnot-a-number\n2\n")
+    events = fake_stack.wait_for_services(
+        supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
+    )
+    llm_pid = next(pid for service, _cwd, pid in events if service == "llm")
+    llm_command = (
+        Path(f"/proc/{llm_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    )
+    supervisor.send_signal(signal.SIGINT)
+    output = supervisor.communicate(timeout=12)[0]
+
+    assert supervisor.returncode == 130
+    assert f"--config {selected}" in llm_command
+    assert "  1) general/alpha" in output
+    assert "  2) roleplay/gemma4/primary config" in output
+    assert "Select configuration [1-2]:" in output
+    assert output.count("enter a number between 1 and 2") == 2
+    assert "primary config.kcpps" not in output
+
+
+def test_koboldcpp_auto_start_fails_when_models_have_no_configs(
+    fake_stack: FakeStack,
+) -> None:
+    (fake_stack.llm_dir / "models").mkdir()
+    fake_stack.env.pop("ST_STACK_LLM_COMMAND")
+    fake_stack.env.pop("ST_STACK_KOBOLD_CONFIG", None)
+
+    process = fake_stack.start()
+    output = process.communicate(timeout=10)[0]
+
+    assert process.returncode == 1
+    assert "no KoboldCpp .kcpps configs found under" in output
+    assert fake_stack.read_events() == []
 
 
 def test_stop_flag_stops_the_supervised_stack(fake_stack: FakeStack) -> None:

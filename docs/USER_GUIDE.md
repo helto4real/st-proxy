@@ -583,8 +583,11 @@ This script is not a portable default installation:
 
 - Its non-LLM application directories remain constants near the top of the
   script and must match your computer.
-- Configure the LLM with `ST_PROXY_LLM_BACKEND`, `ST_PROXY_LLM_URL`,
-  `ST_STACK_LLM_DIR`, and `ST_STACK_LLM_COMMAND`.
+- Configure the LLM with `ST_PROXY_LLM_BACKEND`, `ST_PROXY_LLM_URL`, and
+  `ST_STACK_LLM_DIR`.
+- When using KoboldCpp without `ST_STACK_LLM_COMMAND`, the supervisor scans
+  `ST_STACK_KOBOLD_CONFIG_DIR` recursively for `.kcpps` files. The config
+  directory defaults to `models` beneath `ST_STACK_LLM_DIR`.
 - Its default port layout differs from the standalone examples in this guide:
   its KoboldCpp profile expects the real LLM and ComfyUI origins on `5001` and `8188`, and
   exposes the proxy on `5002` and `8189`.
@@ -595,6 +598,20 @@ After adapting it to your environment:
 ```bash
 ./st-stack.zsh
 ```
+
+The interactive KoboldCpp list displays paths relative to `models` and omits
+the `.kcpps` extension. To select a config without a prompt, set its relative
+path with or without the extension:
+
+```bash
+export ST_STACK_KOBOLD_CONFIG='roleplay/gemma4/role-play-no-thinking-goetia-26b'
+./st-stack.zsh
+```
+
+`ST_STACK_KOBOLD_EXECUTABLE` changes the KoboldCpp executable and defaults to
+`./koboldcpp-linux-x64`. Setting `ST_STACK_LLM_COMMAND` preserves the generic
+custom-command behavior and takes precedence over automatic KoboldCpp config
+selection.
 
 Show child-process output:
 
