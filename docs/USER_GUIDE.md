@@ -49,8 +49,11 @@ When a chat reaches the front of the queue, it:
 4. Verifies that the original model is ready.
 5. Starts the queued chat.
 
-If no request is waiting, the current backend remains loaded. This avoids an
-unnecessary unload/reload cycle after every image.
+If no request is waiting after an image, ComfyUI remains loaded for up to 60
+seconds so consecutive image requests can reuse it. New work resets that idle
+timer. Once the full idle period passes with no active or queued jobs, the proxy
+frees ComfyUI and restores the startup LLM state so the next chat can begin
+without waiting for a handoff.
 
 ![FIFO queue showing two consecutive images using one ComfyUI ownership period before switching once to KoboldCpp](images/lazy-fifo-flow.png)
 
@@ -61,7 +64,7 @@ unnecessary unload/reload cycle after every image.
 | Image 1 → Image 2 → Chat 1 | One switch to ComfyUI, both images run, then one switch back to the LLM |
 | Image 1 → Chat 1 → Image 2 | Chat 1 runs between the images; Image 2 cannot overtake it |
 | Chat 1 → Chat 2 → Image 1 | Both chats may run concurrently; the image waits until both finish |
-| Image 1 → no new request | ComfyUI stays ready until a chat actually arrives |
+| Image 1 → no new request | ComfyUI stays ready for 60 seconds, then the proxy restores the LLM |
 
 ## Requirements
 
@@ -350,6 +353,8 @@ The chat starts after the original LLM model is verified.
 | `last_error` | Most recent controlled error or warning |
 | `chat_available` | Whether the broker can accept chat requests; `true` does not mean the LLM is already loaded |
 | `llm_backend` | Selected lifecycle adapter, such as `koboldcpp` or `ollama` |
+| `idle_timeout` | Configured ComfyUI idle period in seconds |
+| `idle_restore_scheduled` | Whether the broker is currently counting down to an idle LLM restore |
 
 `waiting_chats` and `waiting_images` count queued work. The request currently
 being activated or processed is not included in those counters.
@@ -377,6 +382,8 @@ being activated or processed is not included in those counters.
 - A chat waiting behind images is normal.
 - An image waiting for a streaming chat is normal.
 - Consecutive images reuse the ComfyUI ownership period.
+- After 60 seconds without active or queued work, ComfyUI is freed and the
+  selected LLM is restored and verified.
 - Consecutive chats can run concurrently until an image reaches the front of
   the queue.
 - Stop the proxy with `Ctrl+C` so it can restore the LLM safely.
@@ -403,6 +410,7 @@ environment.
 | `--unload-timeout` | `ST_PROXY_UNLOAD_TIMEOUT` | `180` seconds | Maximum LLM release/verification time |
 | `--reload-timeout` | `ST_PROXY_RELOAD_TIMEOUT` | `600` seconds | Maximum LLM restore/verification time |
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds | Maximum ComfyUI cleanup time |
+| `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds | ComfyUI idle period before proactively restoring the LLM |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds | Backend state polling interval |
 | `--check-backend` | — | disabled | Check LLM control and readiness, then exit |
 | `--backend-check-timeout` | `ST_PROXY_BACKEND_CHECK_TIMEOUT` | `2` seconds | Readiness-command timeout |
@@ -653,7 +661,7 @@ Healthy idle states:
 
 ```text
 llm_ready   — the selected LLM owns the GPU
-comfy_ready — ComfyUI owns the GPU
+comfy_ready — ComfyUI owns the GPU during the configured idle grace period
 ```
 
 Safe stop:

@@ -75,6 +75,7 @@ class BrokerConfig:
     unload_timeout: float = 180.0
     reload_timeout: float = 600.0
     cleanup_timeout: float = 60.0
+    idle_timeout: float = 60.0
     poll_interval: float = 0.5
     test_mode: bool = False
     test_registry: TestEndpointRegistry | None = field(default=None, repr=False, compare=False)
@@ -102,6 +103,7 @@ class BrokerConfig:
             "unload_timeout",
             "reload_timeout",
             "cleanup_timeout",
+            "idle_timeout",
             "poll_interval",
         ):
             if getattr(self, name) <= 0:
@@ -143,6 +145,7 @@ class BrokerConfig:
             unload_timeout=5,
             reload_timeout=5,
             cleanup_timeout=5,
+            idle_timeout=60,
             poll_interval=0.01,
         )
         return replace(config, **overrides) if overrides else config

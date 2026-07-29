@@ -38,6 +38,10 @@ class GpuOwner(StrEnum):
     UNKNOWN = "unknown"
 
 
+class _DispatchSignal(StrEnum):
+    IDLE_RESTORE = "idle_restore"
+
+
 @dataclass(slots=True)
 class SubmissionOutcome:
     response: BufferedResponse | None = None
@@ -63,6 +67,7 @@ class ImageWork:
 
 
 QueuedWork = ChatWork | ImageWork
+DispatchItem = QueuedWork | _DispatchSignal
 
 
 class HandoffCoordinator:
@@ -89,6 +94,7 @@ class HandoffCoordinator:
         self._state = HandoffState.INITIALIZING
         self._closing = False
         self._dispatcher: asyncio.Task[None] | None = None
+        self._idle_restore_deadline: float | None = None
 
     def _set_state(self, state: HandoffState) -> None:
         if state == self._state:
@@ -109,6 +115,8 @@ class HandoffCoordinator:
             "last_error": self._last_error,
             "chat_available": not self._fatal_error and not self._closing,
             "llm_backend": self._llm.info.kind,
+            "idle_timeout": self._config.idle_timeout,
+            "idle_restore_scheduled": self._idle_restore_deadline is not None,
         }
 
     async def initialize(self) -> bool:
@@ -140,8 +148,9 @@ class HandoffCoordinator:
             )
             self._condition.notify_all()
         LOG.info(
-            "broker initialization completed: GPU owner=%s",
+            "broker initialization completed: GPU owner=%s idle_timeout=%.1fs",
             self._llm.info.label,
+            self._config.idle_timeout,
         )
         return True
 
@@ -158,6 +167,7 @@ class HandoffCoordinator:
             if self._fatal_error:
                 raise ChatUnavailable(self._fatal_error)
             work = ChatWork(self._next_sequence(), loop.create_future())
+            self._cancel_idle_restore(f"chat request arrived: sequence={work.sequence}")
             self._queue.append(work)
             self._waiting_chats += 1
             LOG.info(
@@ -212,6 +222,7 @@ class HandoffCoordinator:
                 body,
                 loop.create_future(),
             )
+            self._cancel_idle_restore(f"image request arrived: sequence={work.sequence}")
             self._queue.append(work)
             self._waiting_images += 1
             LOG.info(
@@ -226,12 +237,49 @@ class HandoffCoordinator:
             raise HandoffError(outcome.error or "image handoff failed before submission")
         return outcome.response
 
-    async def _next_work(self) -> QueuedWork | None:
+    def _idle_restore_is_safe(self) -> bool:
+        return (
+            self._owner is GpuOwner.COMFY
+            and self._state is HandoffState.COMFY_READY
+            and not self._queue
+            and not self._active_chats
+            and self._active_prompt_id is None
+            and not self._closing
+            and not self._fatal_error
+        )
+
+    def _cancel_idle_restore(self, reason: str) -> None:
+        if self._idle_restore_deadline is None:
+            return
+        self._idle_restore_deadline = None
+        LOG.info("ComfyUI idle restore timer cancelled: %s", reason)
+
+    async def _next_work(self) -> DispatchItem | None:
         async with self._condition:
             while not self._queue and not self._closing and not self._fatal_error:
-                await self._condition.wait()
+                if not self._idle_restore_is_safe():
+                    self._cancel_idle_restore("GPU ownership or lifecycle state changed")
+                    await self._condition.wait()
+                    continue
+                loop = asyncio.get_running_loop()
+                if self._idle_restore_deadline is None:
+                    self._idle_restore_deadline = loop.time() + self._config.idle_timeout
+                    LOG.info(
+                        "ComfyUI idle restore timer started: timeout=%.1fs",
+                        self._config.idle_timeout,
+                    )
+                remaining = self._idle_restore_deadline - loop.time()
+                if remaining <= 0:
+                    self._idle_restore_deadline = None
+                    return _DispatchSignal.IDLE_RESTORE
+                try:
+                    async with asyncio.timeout(remaining):
+                        await self._condition.wait()
+                except TimeoutError:
+                    pass
             if self._closing or self._fatal_error:
                 return None
+            self._cancel_idle_restore("queued work is ready to dispatch")
             work = self._queue.popleft()
             if isinstance(work, ChatWork):
                 self._waiting_chats -= 1
@@ -240,13 +288,15 @@ class HandoffCoordinator:
             return work
 
     async def _dispatch(self) -> None:
-        current: QueuedWork | None = None
+        current: DispatchItem | None = None
         try:
-            while current := await self._next_work():
+            while (current := await self._next_work()) is not None:
                 if isinstance(current, ChatWork):
                     await self._dispatch_chat(current)
-                else:
+                elif isinstance(current, ImageWork):
                     await self._dispatch_image(current)
+                else:
+                    await self._dispatch_idle_restore()
                 current = None
         except asyncio.CancelledError:
             if isinstance(current, ChatWork):
@@ -264,6 +314,32 @@ class HandoffCoordinator:
             elif isinstance(current, ImageWork):
                 self._resolve_image_error(current, error)
             await self._mark_fatal(error)
+
+    async def _dispatch_idle_restore(self) -> None:
+        async with self._condition:
+            if not self._idle_restore_is_safe():
+                LOG.info("ComfyUI idle restore skipped: work or lifecycle state changed")
+                return
+            self._owner = GpuOwner.UNKNOWN
+            self._set_state(HandoffState.CLEANING_COMFY)
+
+        LOG.info(
+            "ComfyUI idle timeout reached: restoring GPU ownership to %s",
+            self._llm.info.label,
+        )
+        errors: list[str] = []
+        restored = await self._restore_llm(errors)
+        self._record_errors(errors)
+        if restored:
+            LOG.info(
+                "ComfyUI idle restore completed: owner=%s",
+                self._llm.info.label,
+            )
+        else:
+            LOG.error(
+                "ComfyUI idle restore failed: %s is not confirmed ready",
+                self._llm.info.label,
+            )
 
     async def _dispatch_chat(self, work: ChatWork) -> None:
         if work.cancelled:
@@ -412,6 +488,7 @@ class HandoffCoordinator:
 
     async def _mark_fatal(self, error: str) -> None:
         async with self._condition:
+            self._cancel_idle_restore("broker entered a fatal error state")
             self._fatal_error = error
             self._set_state(HandoffState.ERROR)
             self._fail_queued(error)
@@ -448,6 +525,7 @@ class HandoffCoordinator:
         self._set_state(HandoffState.SHUTTING_DOWN)
         LOG.info("handoff coordinator shutdown started")
         async with self._condition:
+            self._cancel_idle_restore("broker is shutting down")
             self._fail_queued("broker is shutting down")
             self._condition.notify_all()
         if self._dispatcher is not None:

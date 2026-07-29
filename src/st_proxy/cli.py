@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--unload-timeout", type=float, default=_env_float("UNLOAD_TIMEOUT", 180))
     parser.add_argument("--reload-timeout", type=float, default=_env_float("RELOAD_TIMEOUT", 600))
     parser.add_argument("--cleanup-timeout", type=float, default=_env_float("CLEANUP_TIMEOUT", 60))
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=_env_float("IDLE_TIMEOUT", 60),
+        help="restore the selected LLM after ComfyUI has been idle for this many seconds",
+    )
     parser.add_argument("--poll-interval", type=float, default=_env_float("POLL_INTERVAL", 0.5))
     parser.add_argument(
         "--check-backend",
@@ -100,6 +106,7 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         unload_timeout=args.unload_timeout,
         reload_timeout=args.reload_timeout,
         cleanup_timeout=args.cleanup_timeout,
+        idle_timeout=args.idle_timeout,
         poll_interval=args.poll_interval,
     )
 

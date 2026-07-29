@@ -66,6 +66,7 @@ typeset -g START_TIMEOUT="${ST_STACK_START_TIMEOUT:-60}"
 typeset -g STOP_TIMEOUT="${ST_STACK_STOP_TIMEOUT:-10}"
 typeset -g PROXY_CHAT_PORT="${ST_PROXY_CHAT_PORT:-5002}"
 typeset -g PROXY_IMAGE_PORT="${ST_PROXY_IMAGE_PORT:-8189}"
+typeset -g PROXY_IDLE_TIMEOUT="${ST_PROXY_IDLE_TIMEOUT:-60}"
 typeset -g LLM_PORT=""
 typeset -g POCKETTTS_PORT="${ST_STACK_POCKETTTS_PORT:-8008}"
 typeset -g ALLTALK_PORT="${ST_STACK_ALLTALK_PORT:-7851}"
@@ -569,7 +570,8 @@ ensure_service_started() {
                 --llm-url "${LLM_URL}" \
                 --comfy-url "${COMFY_URL}" \
                 --chat-port "${PROXY_CHAT_PORT}" \
-                --image-port "${PROXY_IMAGE_PORT}"
+                --image-port "${PROXY_IMAGE_PORT}" \
+                --idle-timeout "${PROXY_IDLE_TIMEOUT}"
             ;;
         *)
             log "internal error: unknown service ${service}"

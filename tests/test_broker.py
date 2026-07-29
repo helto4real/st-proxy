@@ -103,6 +103,41 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.comfy.free_calls, 2)
         self.assertEqual((await self.status())["state"], "llm_ready")
 
+    async def test_idle_timeout_restores_kobold_without_a_chat_request(self) -> None:
+        await self.service.stop()
+        free_calls_before_restart = self.comfy.free_calls
+        self.config = BrokerConfig.for_test(
+            kobold_url=self.kobold_server.url,
+            comfy_url=self.comfy_server.url,
+            registry=self.registry,
+            idle_timeout=0.05,
+        )
+        self.service = BrokerService(self.config)
+        await self.service.start()
+
+        response = await self.post_prompt()
+        response.close()
+        await self.wait_comfy_ready()
+        await wait_until(
+            lambda: (
+                self.service.coordinator is not None
+                and self.service.coordinator.status()["idle_restore_scheduled"]
+            )
+        )
+        status = await self.status()
+        self.assertEqual(status["idle_timeout"], 0.05)
+        self.assertTrue(status["idle_restore_scheduled"])
+
+        await self.wait_ready()
+        self.assertEqual(
+            self.kobold.admin_calls,
+            ["unload_model", "initial_model"],
+        )
+        self.assertEqual(self.comfy.free_calls, free_calls_before_restart + 2)
+        status = await self.status()
+        self.assertEqual(status["gpu_owner"], "llm")
+        self.assertFalse(status["idle_restore_scheduled"])
+
     async def test_startup_frees_comfy_before_accepting_chat(self) -> None:
         self.assertEqual(self.comfy.free_calls, 1)
         self.assertEqual(

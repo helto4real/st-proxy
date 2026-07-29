@@ -16,6 +16,7 @@ def test_default_cli_uses_koboldcpp_compatibility_defaults() -> None:
 
     assert config.llm_backend == "koboldcpp"
     assert config.llm_url == "http://127.0.0.1:5002"
+    assert config.idle_timeout == 60
 
 
 def test_ollama_cli_uses_backend_specific_default_origin() -> None:
@@ -42,3 +43,9 @@ def test_generic_llm_url_takes_selected_backend() -> None:
 
     assert config.llm_backend == "ollama"
     assert config.llm_url == "http://127.0.0.1:12000"
+
+
+def test_idle_timeout_cli_option_maps_to_config() -> None:
+    config = _parse("--idle-timeout", "12.5")
+
+    assert config.idle_timeout == 12.5

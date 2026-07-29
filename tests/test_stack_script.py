@@ -277,6 +277,7 @@ def test_start_order_working_directories_and_logging(
     assert "--comfy-url http://127.0.0.1:8188" in proxy_command
     assert "--chat-port 5002" in proxy_command
     assert "--image-port 8189" in proxy_command
+    assert "--idle-timeout 60" in proxy_command
 
     assert "http://127.0.0.1:5001" in readiness_requests
     assert "http://127.0.0.1:8008/health" in readiness_requests
