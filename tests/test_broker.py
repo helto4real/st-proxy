@@ -242,6 +242,21 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         await self.wait_comfy_ready()
         self.assertEqual(self.kobold.admin_calls, ["unload_model"])
 
+    async def test_userdata_api_alias_uses_the_legacy_upstream_route(self) -> None:
+        async with self.client.get(
+            f"{self.image_url}/api/userdata/workflows/synthetic.json",
+        ) as response:
+            self.assertEqual(response.status, 200)
+
+        self.assertIn(
+            ("GET", "/userdata/workflows/synthetic.json"),
+            self.comfy.generic_requests,
+        )
+        self.assertNotIn(
+            ("GET", "/api/userdata/workflows/synthetic.json"),
+            self.comfy.generic_requests,
+        )
+
     async def test_external_comfy_lifecycle_request_is_rejected(self) -> None:
         free_calls = self.comfy.free_calls
 

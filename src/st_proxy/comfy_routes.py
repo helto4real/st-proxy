@@ -15,6 +15,18 @@ WORKFLOW_PATHS = frozenset({"/prompt", "/api/prompt"})
 CONTROL_PATHS = frozenset({"/interrupt", "/queue"})
 LIFECYCLE_PATHS = frozenset({"/free"})
 
+# ComfyUI's frontend uses these /api aliases while older backend versions only
+# expose the corresponding unprefixed routes. Keep this list narrow: some
+# routes, such as /api/jobs and /api/assets, are genuine API-only endpoints.
+EXACT_UPSTREAM_ROUTE_ALIASES = {
+    "/api/prompt": "/prompt",
+    "/api/users": "/users",
+}
+PREFIX_UPSTREAM_ROUTE_ALIASES = {
+    "/api/settings": "/settings",
+    "/api/userdata": "/userdata",
+}
+
 # These routes mutate files or user-interface state but do not execute a workflow.
 # Prefixes cover the corresponding per-user and per-resource forms.
 SAFE_MUTATION_PATHS = frozenset(
@@ -22,6 +34,7 @@ SAFE_MUTATION_PATHS = frozenset(
         "/api/assets",
         "/api/settings",
         "/api/userdata",
+        "/api/users",
         "/history",
         "/settings",
         "/upload/image",
@@ -38,6 +51,17 @@ SAFE_MUTATION_PREFIXES = (
     "/userdata/",
     "/users/",
 )
+
+
+def comfy_upstream_path(path: str) -> str:
+    if alias := EXACT_UPSTREAM_ROUTE_ALIASES.get(path):
+        return alias
+    for public_prefix, upstream_prefix in PREFIX_UPSTREAM_ROUTE_ALIASES.items():
+        if path == public_prefix:
+            return upstream_prefix
+        if path.startswith(public_prefix + "/"):
+            return upstream_prefix + path[len(public_prefix) :]
+    return path
 
 
 def _is_job_cancel(path: str) -> bool:

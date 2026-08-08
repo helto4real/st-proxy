@@ -44,6 +44,12 @@ passthrough. It is a compatibility escape hatch, not an ownership guarantee.
 Review custom routes before enabling it because an extension may allocate GPU
 memory without submitting a normal ComfyUI prompt.
 
+For compatibility with ComfyUI backends that expose only the legacy route
+names, the gateway translates the frontend aliases `/api/prompt`,
+`/api/settings`, `/api/userdata`, and `/api/users` to their unprefixed upstream
+equivalents. Other `/api/...` routes are preserved because endpoints such as
+`/api/jobs` and `/api/assets` are genuine API routes.
+
 ## Workflow lease sequence
 
 1. A workflow submission joins the same FIFO as chat work.

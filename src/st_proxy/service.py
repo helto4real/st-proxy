@@ -7,7 +7,7 @@ from typing import Any
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 
 from .comfy import ComfyClient
-from .comfy_routes import ComfyRouteKind, classify_comfy_route
+from .comfy_routes import ComfyRouteKind, classify_comfy_route, comfy_upstream_path
 from .config import BrokerConfig
 from .coordinator import HandoffCoordinator
 from .errors import BrokerError, ChatUnavailable, HandoffError
@@ -153,6 +153,7 @@ class BrokerService:
             request.path,
         )
         route_kind = classify_comfy_route(request.method, request.path)
+        upstream_path = comfy_upstream_path(request.path)
         if route_kind is ComfyRouteKind.LIFECYCLE:
             LOG.warning(
                 "request rejected: target=ComfyUI method=%s path=%s status=403 "
@@ -191,7 +192,7 @@ class BrokerService:
                     upstream_request_headers(request, self.config.comfy_url).items()
                 )
                 response = await self.coordinator.submit_image(
-                    path=request.path,
+                    path=upstream_path,
                     query_string=request.query_string,
                     headers=headers,
                     body=body,
@@ -221,9 +222,19 @@ class BrokerService:
                 response = await proxy_websocket(request, self.session, self.config.comfy_url)
             elif route_kind is ComfyRouteKind.CONTROL:
                 async with self.coordinator.comfy_control_lease():
-                    response = await proxy_stream(request, self.session, self.config.comfy_url)
+                    response = await proxy_stream(
+                        request,
+                        self.session,
+                        self.config.comfy_url,
+                        path=upstream_path,
+                    )
             else:
-                response = await proxy_stream(request, self.session, self.config.comfy_url)
+                response = await proxy_stream(
+                    request,
+                    self.session,
+                    self.config.comfy_url,
+                    path=upstream_path,
+                )
             request_log(
                 "request completed: target=ComfyUI method=%s path=%s status=%s duration=%.3fs",
                 request.method,

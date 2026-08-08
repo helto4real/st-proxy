@@ -33,10 +33,16 @@ HOP_BY_HOP_HEADERS = frozenset(
 LOG = logging.getLogger(__name__)
 
 
-def upstream_url(origin: str, request: web.Request) -> str:
+def upstream_url(
+    origin: str,
+    request: web.Request,
+    *,
+    path: str | None = None,
+) -> str:
     base = urlsplit(origin)
-    path = f"{base.path.rstrip('/')}/{request.path.lstrip('/')}"
-    return urlunsplit((base.scheme, base.netloc, path, request.query_string, ""))
+    request_path = request.path if path is None else path
+    joined = f"{base.path.rstrip('/')}/{request_path.lstrip('/')}"
+    return urlunsplit((base.scheme, base.netloc, joined, request.query_string, ""))
 
 
 def child_url(origin: str, path: str) -> str:
@@ -142,10 +148,12 @@ async def proxy_stream(
     request: web.Request,
     session: ClientSession,
     origin: str,
+    *,
+    path: str | None = None,
 ) -> web.StreamResponse:
     async with session.request(
         request.method,
-        upstream_url(origin, request),
+        upstream_url(origin, request, path=path),
         headers=upstream_request_headers(request, origin),
         data=request_body(request),
         allow_redirects=False,

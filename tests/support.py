@@ -134,7 +134,6 @@ class MockComfy:
     def app(self) -> web.Application:
         app = web.Application()
         app.router.add_post("/prompt", self.prompt)
-        app.router.add_post("/api/prompt", self.prompt)
         app.router.add_get("/history/{prompt_id}", self.history)
         app.router.add_post("/free", self.free)
         app.router.add_post("/interrupt", self.interrupt)
