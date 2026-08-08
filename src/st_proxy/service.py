@@ -153,7 +153,7 @@ class BrokerService:
             request.path,
         )
         route_kind = classify_comfy_route(request.method, request.path)
-        upstream_path = comfy_upstream_path(request.path)
+        upstream_raw_path = comfy_upstream_path(request.rel_url.raw_path)
         if route_kind is ComfyRouteKind.LIFECYCLE:
             LOG.warning(
                 "request rejected: target=ComfyUI method=%s path=%s status=403 "
@@ -192,8 +192,8 @@ class BrokerService:
                     upstream_request_headers(request, self.config.comfy_url).items()
                 )
                 response = await self.coordinator.submit_image(
-                    path=upstream_path,
-                    query_string=request.query_string,
+                    path=upstream_raw_path,
+                    query_string=request.rel_url.raw_query_string,
                     headers=headers,
                     body=body,
                 )
@@ -226,14 +226,14 @@ class BrokerService:
                         request,
                         self.session,
                         self.config.comfy_url,
-                        path=upstream_path,
+                        raw_path=upstream_raw_path,
                     )
             else:
                 response = await proxy_stream(
                     request,
                     self.session,
                     self.config.comfy_url,
-                    path=upstream_path,
+                    raw_path=upstream_raw_path,
                 )
             request_log(
                 "request completed: target=ComfyUI method=%s path=%s status=%s duration=%.3fs",

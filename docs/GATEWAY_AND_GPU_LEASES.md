@@ -50,6 +50,11 @@ names, the gateway translates the frontend aliases `/api/prompt`,
 equivalents. Other `/api/...` routes are preserved because endpoints such as
 `/api/jobs` and `/api/assets` are genuine API routes.
 
+The transport preserves the browser's raw percent-encoded path. This is
+required for nested userdata names: ComfyUI sends a path such as
+`workflows/example.json` as the single route segment
+`workflows%2Fexample.json`.
+
 ## Workflow lease sequence
 
 1. A workflow submission joins the same FIFO as chat work.

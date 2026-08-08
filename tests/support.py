@@ -129,6 +129,7 @@ class MockComfy:
     interrupt_calls: int = 0
     websocket_client_ids: list[str] = field(default_factory=list)
     websocket_origins: list[str | None] = field(default_factory=list)
+    userdata_requests: list[str] = field(default_factory=list)
     generic_requests: list[tuple[str, str]] = field(default_factory=list)
 
     def app(self) -> web.Application:
@@ -138,6 +139,7 @@ class MockComfy:
         app.router.add_post("/free", self.free)
         app.router.add_post("/interrupt", self.interrupt)
         app.router.add_get("/ws", self.websocket)
+        app.router.add_get("/userdata/{file}", self.userdata)
         app.router.add_route("*", "/{tail:.*}", self.generic)
         return app
 
@@ -204,6 +206,10 @@ class MockComfy:
             elif message.type is WSMsgType.BINARY:
                 await response.send_bytes(b"upstream:" + message.data)
         return response
+
+    async def userdata(self, request: web.Request) -> web.Response:
+        self.userdata_requests.append(request.match_info["file"])
+        return web.json_response({"ok": True})
 
     async def generic(self, _request: web.Request) -> web.Response:
         self.generic_requests.append((_request.method, _request.path))
