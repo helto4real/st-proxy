@@ -51,7 +51,9 @@ fail-closed and gets HTTP 503. The latest error is visible at
 
 The broker owns ComfyUI lifecycle routes such as `POST /free`. Unknown mutating
 custom-node routes are rejected by default because they may perform GPU work
-outside the workflow queue. Compatibility passthrough is an explicit opt-in.
+outside the workflow queue. Reviewed CPU-only Helto privacy and keystore routes
+are explicit passthrough exceptions. Compatibility passthrough is an explicit
+opt-in for everything else.
 
 ## Requirements
 

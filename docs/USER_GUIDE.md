@@ -587,6 +587,10 @@ classification. For a trusted extension that requires broad compatibility, set
 `ST_PROXY_ALLOW_UNKNOWN_COMFY_ROUTES=true`; this weakens the GPU-ownership
 boundary for those routes.
 
+Current versions explicitly pass the reviewed `helto-privacy` keystore routes
+and Helto Director timeline encryption/decryption routes without taking a GPU
+lease. Other mutating routes under those namespaces remain blocked by default.
+
 ## Security and privacy
 
 - Loopback is the safe default.
