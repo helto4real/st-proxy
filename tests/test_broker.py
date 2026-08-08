@@ -254,11 +254,12 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_external_comfy_lifecycle_request_is_rejected(self) -> None:
         free_calls = self.comfy.free_calls
 
-        async with self.client.post(
-            f"{self.image_url}/free",
-            json={"unload_models": True, "free_memory": True},
-        ) as response:
-            self.assertEqual(response.status, 403)
+        for path in ("/free", "/api/free"):
+            async with self.client.post(
+                f"{self.image_url}{path}",
+                json={"unload_models": True, "free_memory": True},
+            ) as response:
+                self.assertEqual(response.status, 403)
 
         self.assertEqual(self.comfy.free_calls, free_calls)
 
@@ -298,6 +299,36 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.kobold.admin_calls, [])
 
+    async def test_reviewed_extension_mutations_pass_without_gpu_handoff(self) -> None:
+        paths = (
+            "/api/helto_queue_manager/state",
+            "/helto_selector/delete_images",
+            "/helto_director/library/projects/synthetic-id/preview",
+            "/helto_spm/privacy/decrypt",
+            "/aio_image_generate/privacy/decrypt",
+        )
+
+        for path in paths:
+            async with self.client.post(
+                f"{self.image_url}{path}",
+                json={"synthetic": True},
+            ) as response:
+                self.assertEqual(response.status, 200)
+
+        for path in paths:
+            self.assertIn(("POST", path), self.comfy.generic_requests)
+        self.assertEqual(self.kobold.admin_calls, [])
+
+    async def test_gpu_capable_optimizer_mutation_remains_blocked(self) -> None:
+        path = "/helto_director/prompt_optimizer/optimize/start"
+        async with self.client.post(
+            f"{self.image_url}{path}",
+            json={"synthetic": True},
+        ) as response:
+            self.assertEqual(response.status, 403)
+
+        self.assertNotIn(("POST", path), self.comfy.generic_requests)
+
     async def test_unknown_comfy_mutation_can_be_enabled_explicitly(self) -> None:
         await self.service.stop()
         self.config = BrokerConfig.for_test(
@@ -315,13 +346,13 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("POST", "/custom-node/settings"), self.comfy.generic_requests)
         self.assertEqual((await self.status())["comfy_route_policy"], "compatible")
 
-    async def test_interrupt_is_coordinated_with_the_active_comfy_workflow(self) -> None:
+    async def test_api_interrupt_alias_is_coordinated_with_active_comfy_workflow(self) -> None:
         self.comfy.auto_complete = False
         image = await self.post_prompt()
         image.close()
         await wait_until(lambda: self.comfy.prompt_calls == ["synthetic-1"])
 
-        async with self.client.post(f"{self.image_url}/interrupt") as response:
+        async with self.client.post(f"{self.image_url}/api/interrupt") as response:
             self.assertEqual(response.status, 200)
 
         await self.wait_ready()
@@ -333,6 +364,25 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 409)
 
         self.assertEqual(self.comfy.interrupt_calls, 0)
+
+    async def test_custom_control_is_allowed_only_while_comfy_owns_gpu(self) -> None:
+        route = "/api/helto_save_image_advanced/release"
+        async with self.client.post(f"{self.image_url}{route}") as response:
+            self.assertEqual(response.status, 409)
+        self.assertNotIn(("POST", route), self.comfy.generic_requests)
+
+        self.comfy.auto_complete = False
+        image = await self.post_prompt()
+        image.close()
+        await wait_until(lambda: self.comfy.prompt_calls == ["synthetic-1"])
+
+        async with self.client.post(f"{self.image_url}{route}") as response:
+            self.assertEqual(response.status, 200)
+        self.assertIn(("POST", route), self.comfy.generic_requests)
+
+        async with self.client.post(f"{self.image_url}/interrupt") as response:
+            self.assertEqual(response.status, 200)
+        await self.wait_ready()
 
     async def test_startup_fails_closed_when_comfy_cannot_be_freed(self) -> None:
         await self.service.stop()

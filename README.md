@@ -51,9 +51,11 @@ fail-closed and gets HTTP 503. The latest error is visible at
 
 The broker owns ComfyUI lifecycle routes such as `POST /free`. Unknown mutating
 custom-node routes are rejected by default because they may perform GPU work
-outside the workflow queue. Reviewed CPU-only Helto privacy and keystore routes
-are explicit passthrough exceptions. Compatibility passthrough is an explicit
-opt-in for everything else.
+outside the workflow queue. Reviewed non-GPU routes in the Helto privacy,
+utility, Director, Smart Prompt, and all-in-one image-generation packs are
+method-scoped passthrough exceptions. Reviewed release/unload routes are
+allowed only while ComfyUI owns the GPU. Compatibility passthrough is an
+explicit opt-in for everything else.
 
 ## Requirements
 
@@ -251,7 +253,8 @@ Strict ComfyUI route policy coordinates workflow and cancellation routes,
 reserves lifecycle routes for the broker, and rejects unclassified mutations.
 Use `--allow-unknown-comfy-routes` only for a trusted custom extension whose
 mutating routes you have reviewed. Those routes are passed through without GPU
-coordination.
+coordination. Helto Director prompt-optimizer execution remains blocked in
+strict mode because it can start GPU work outside the normal workflow queue.
 
 ## Adding another LLM backend
 

@@ -587,10 +587,18 @@ classification. For a trusted extension that requires broad compatibility, set
 `ST_PROXY_ALLOW_UNKNOWN_COMFY_ROUTES=true`; this weakens the GPU-ownership
 boundary for those routes.
 
-Current versions explicitly pass the reviewed `helto-privacy` keystore routes,
-Helto Director timeline encryption/decryption routes, and authenticated H3
-preview decryption without taking a GPU lease. Other mutating routes under
-those namespaces remain blocked by default.
+Current versions explicitly pass the reviewed non-GPU privacy, settings,
+library, media-browser, selector, queue-manager, prompt-library, folder, and
+metadata routes from `helto-privacy`, `comfyui-utils`,
+`comfyui-helto-director`, `comfyui-helto-smartprompt`, and
+`comfyui-all-on-one-image-generation-node`. The rules match HTTP method and a
+specific path or narrow path pattern; other mutations in those namespaces stay
+blocked by default.
+
+Reviewed release and model-unload buttons work only while ComfyUI owns the GPU.
+Helto Director's prompt-optimizer execution routes remain blocked because they
+can start GPU work outside the normal workflow queue. Keep strict mode enabled;
+do not use the compatibility switch to bypass that ownership boundary.
 
 ## Security and privacy
 
