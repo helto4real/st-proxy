@@ -285,6 +285,19 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.kobold.admin_calls, [])
 
+    async def test_h3_preview_decrypt_api_route_passes_without_gpu_handoff(self) -> None:
+        async with self.client.post(
+            f"{self.image_url}/api/helto_director/h3_preview/decrypt",
+            json={"envelope": {"synthetic": True}},
+        ) as response:
+            self.assertEqual(response.status, 200)
+
+        self.assertIn(
+            ("POST", "/api/helto_director/h3_preview/decrypt"),
+            self.comfy.generic_requests,
+        )
+        self.assertEqual(self.kobold.admin_calls, [])
+
     async def test_unknown_comfy_mutation_can_be_enabled_explicitly(self) -> None:
         await self.service.stop()
         self.config = BrokerConfig.for_test(

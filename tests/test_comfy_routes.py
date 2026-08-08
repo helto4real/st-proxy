@@ -58,6 +58,8 @@ def test_known_ui_mutations_pass_but_unknown_custom_mutations_fail_closed() -> N
 
 def test_known_helto_privacy_mutations_pass_but_namespace_stays_fail_closed() -> None:
     safe_paths = (
+        "/api/helto_director/h3_preview/decrypt",
+        "/helto_director/h3_preview/decrypt",
         "/helto_director/privacy/decrypt",
         "/helto_director/privacy/encrypt",
         "/helto_director/privacy/keystore/change_password",
@@ -77,5 +79,8 @@ def test_known_helto_privacy_mutations_pass_but_namespace_stays_fail_closed() ->
         ComfyRouteKind.UNKNOWN_MUTATION
     )
     assert classify_comfy_route("POST", "/helto_privacy/encrypt") is (
+        ComfyRouteKind.UNKNOWN_MUTATION
+    )
+    assert classify_comfy_route("POST", "/api/helto_director/h3_preview/render") is (
         ComfyRouteKind.UNKNOWN_MUTATION
     )

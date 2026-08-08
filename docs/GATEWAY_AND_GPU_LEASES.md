@@ -44,10 +44,10 @@ passthrough. It is a compatibility escape hatch, not an ownership guarantee.
 Review custom routes before enabling it because an extension may allocate GPU
 memory without submitting a normal ComfyUI prompt.
 
-The reviewed `helto-privacy` keystore operations and Helto Director timeline
-encryption/decryption routes are allowlisted individually. Their namespaces are
-not allowlisted as prefixes, so a new mutating route still fails closed until it
-has been reviewed.
+The reviewed `helto-privacy` keystore operations, Helto Director timeline
+encryption/decryption routes, and authenticated H3 preview decryption route are
+allowlisted individually. Their namespaces are not allowlisted as prefixes, so
+a new mutating route still fails closed until it has been reviewed.
 
 For compatibility with ComfyUI backends that expose only the legacy route
 names, the gateway translates the frontend aliases `/api/prompt`,

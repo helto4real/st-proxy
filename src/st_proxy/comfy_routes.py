@@ -32,6 +32,7 @@ PREFIX_UPSTREAM_ROUTE_ALIASES = {
 SAFE_MUTATION_PATHS = frozenset(
     {
         "/api/assets",
+        "/api/helto_director/h3_preview/decrypt",
         "/api/settings",
         "/api/userdata",
         "/api/users",
@@ -41,6 +42,7 @@ SAFE_MUTATION_PATHS = frozenset(
         "/helto_director/privacy/keystore/init",
         "/helto_director/privacy/lock",
         "/helto_director/privacy/unlock",
+        "/helto_director/h3_preview/decrypt",
         "/helto_privacy/keystore/change_password",
         "/helto_privacy/keystore/init",
         "/helto_privacy/lock",
