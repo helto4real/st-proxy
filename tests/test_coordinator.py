@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from st_proxy.comfy import PromptResult
 from st_proxy.config import BrokerConfig
 from st_proxy.coordinator import HandoffCoordinator
-from st_proxy.errors import HandoffError, UpstreamError
+from st_proxy.errors import ChatUnavailable, HandoffError, UpstreamError
 from st_proxy.http import BufferedResponse
 from st_proxy.llm import BackendInfo
 
@@ -59,9 +59,13 @@ class FakeLlmBackend:
 class FakeComfyClient:
     calls: list[str] = field(default_factory=list)
     completion: asyncio.Event = field(default_factory=asyncio.Event)
+    free_failures: int = 0
 
     async def free_models(self) -> None:
         self.calls.append("free")
+        if self.free_failures:
+            self.free_failures -= 1
+            raise UpstreamError("synthetic cleanup failure")
 
     async def submit(
         self,
@@ -233,6 +237,40 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
             self.llm.calls,
             ["validate", "snapshot", "release", "acquire"],
         )
+
+    async def test_comfy_control_lease_delays_llm_restore(self) -> None:
+        response = await self.submit_image()
+        self.assertEqual(response.status, 200)
+        self.comfy.completion.set()
+        await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+
+        async def use_chat() -> None:
+            async with self.coordinator.chat_lease():
+                pass
+
+        async with self.coordinator.comfy_control_lease():
+            chat_task = asyncio.create_task(use_chat())
+            await wait_until(lambda: self.coordinator.status()["state"] == "cleaning_comfy")
+            self.assertEqual(self.coordinator.status()["active_comfy_controls"], 1)
+            self.assertNotIn("acquire", self.llm.calls)
+
+        await chat_task
+        self.assertIn("acquire", self.llm.calls)
+        self.assertEqual(self.coordinator.status()["active_comfy_controls"], 0)
+
+    async def test_comfy_cleanup_failure_does_not_reload_llm(self) -> None:
+        response = await self.submit_image()
+        self.assertEqual(response.status, 200)
+        self.comfy.completion.set()
+        await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+        self.comfy.free_failures = 1
+
+        with self.assertRaisesRegex(ChatUnavailable, "GPU release is not confirmed"):
+            async with self.coordinator.chat_lease():
+                pass
+
+        self.assertEqual(self.coordinator.status()["state"], "error")
+        self.assertNotIn("acquire", self.llm.calls)
 
 
 if __name__ == "__main__":

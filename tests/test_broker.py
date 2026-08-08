@@ -181,6 +181,124 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(history_logs), 2)
         self.assertTrue(all(message.startswith("DEBUG:") for message in history_logs))
 
+    async def test_comfy_websocket_stays_connected_across_gpu_handoffs(self) -> None:
+        websocket = await self.client.ws_connect(
+            f"{self.image_url}/ws?clientId=synthetic-browser",
+            origin=self.image_url,
+        )
+        self.assertEqual(
+            await websocket.receive_json(),
+            {"type": "status", "client_id": "synthetic-browser"},
+        )
+        self.assertEqual(self.comfy.websocket_client_ids, ["synthetic-browser"])
+        self.assertEqual(self.comfy.websocket_origins, [self.comfy_server.url])
+        self.assertEqual((await self.status())["gpu_owner"], "llm")
+
+        image = await self.post_prompt()
+        image.close()
+        await self.wait_comfy_ready()
+        await websocket.send_str("feature-flags")
+        self.assertEqual((await websocket.receive()).data, "upstream:feature-flags")
+
+        async with self.client.post(f"{self.chat_url}/api/v1/generate", json={}) as chat:
+            self.assertEqual(chat.status, 200)
+        await self.wait_ready()
+        await websocket.send_bytes(b"still-connected")
+        self.assertEqual((await websocket.receive()).data, b"upstream:still-connected")
+        await websocket.close()
+
+    async def test_comfy_gateway_rewrites_private_origins_and_redirects(self) -> None:
+        async with self.client.get(
+            f"{self.image_url}/inspect-origin",
+            headers={
+                "Origin": self.image_url,
+                "Referer": f"{self.image_url}/workflows/local",
+            },
+        ) as response:
+            self.assertEqual(
+                await response.json(),
+                {
+                    "origin": self.comfy_server.url,
+                    "referer": f"{self.comfy_server.url}/workflows/local",
+                },
+            )
+
+        async with self.client.get(
+            f"{self.image_url}/redirect-to-history",
+            allow_redirects=False,
+        ) as response:
+            self.assertEqual(response.status, 302)
+            self.assertEqual(
+                response.headers["Location"],
+                f"{self.image_url}/history?from=upstream",
+            )
+
+    async def test_api_prompt_alias_uses_the_gpu_coordinator(self) -> None:
+        async with self.client.post(
+            f"{self.image_url}/api/prompt",
+            json=prompt_payload(),
+        ) as response:
+            self.assertEqual(response.status, 200)
+        await self.wait_comfy_ready()
+        self.assertEqual(self.kobold.admin_calls, ["unload_model"])
+
+    async def test_external_comfy_lifecycle_request_is_rejected(self) -> None:
+        free_calls = self.comfy.free_calls
+
+        async with self.client.post(
+            f"{self.image_url}/free",
+            json={"unload_models": True, "free_memory": True},
+        ) as response:
+            self.assertEqual(response.status, 403)
+
+        self.assertEqual(self.comfy.free_calls, free_calls)
+
+    async def test_unknown_comfy_mutation_fails_closed_by_default(self) -> None:
+        async with self.client.post(f"{self.image_url}/custom-node/run-model") as response:
+            self.assertEqual(response.status, 403)
+
+        self.assertNotIn(
+            ("POST", "/custom-node/run-model"),
+            self.comfy.generic_requests,
+        )
+        self.assertEqual((await self.status())["comfy_route_policy"], "strict")
+
+    async def test_unknown_comfy_mutation_can_be_enabled_explicitly(self) -> None:
+        await self.service.stop()
+        self.config = BrokerConfig.for_test(
+            kobold_url=self.kobold_server.url,
+            comfy_url=self.comfy_server.url,
+            registry=self.registry,
+            allow_unknown_comfy_routes=True,
+        )
+        self.service = BrokerService(self.config)
+        await self.service.start()
+
+        async with self.client.post(f"{self.image_url}/custom-node/settings") as response:
+            self.assertEqual(response.status, 200)
+
+        self.assertIn(("POST", "/custom-node/settings"), self.comfy.generic_requests)
+        self.assertEqual((await self.status())["comfy_route_policy"], "compatible")
+
+    async def test_interrupt_is_coordinated_with_the_active_comfy_workflow(self) -> None:
+        self.comfy.auto_complete = False
+        image = await self.post_prompt()
+        image.close()
+        await wait_until(lambda: self.comfy.prompt_calls == ["synthetic-1"])
+
+        async with self.client.post(f"{self.image_url}/interrupt") as response:
+            self.assertEqual(response.status, 200)
+
+        await self.wait_ready()
+        self.assertEqual(self.comfy.interrupt_calls, 1)
+        self.assertEqual(self.kobold.admin_calls, ["unload_model", "initial_model"])
+
+    async def test_interrupt_is_rejected_when_comfy_does_not_own_gpu(self) -> None:
+        async with self.client.post(f"{self.image_url}/interrupt") as response:
+            self.assertEqual(response.status, 409)
+
+        self.assertEqual(self.comfy.interrupt_calls, 0)
+
     async def test_startup_fails_closed_when_comfy_cannot_be_freed(self) -> None:
         await self.service.stop()
         self.comfy.cleanup_failures = 1
@@ -462,15 +580,21 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["state"], "error")
         self.assertIn("confirmation of loaded", status["last_error"])
 
-    async def test_comfy_cleanup_failure_does_not_block_restore(self) -> None:
+    async def test_comfy_cleanup_failure_fails_closed_before_llm_restore(self) -> None:
         self.comfy.cleanup_failures = 1
         response = await self.post_prompt()
         response.close()
         await self.wait_comfy_ready()
         async with self.client.post(f"{self.chat_url}/api/v1/generate", json={}) as chat:
-            self.assertEqual(chat.status, 200)
-        await self.wait_ready()
-        self.assertEqual(self.kobold.model, "synthetic-model.gguf")
+            self.assertEqual(chat.status, 503)
+        await wait_until(
+            lambda: (
+                self.service.coordinator is not None
+                and self.service.coordinator.status()["state"] == "error"
+            )
+        )
+        self.assertEqual(self.kobold.model, "inactive")
+        self.assertNotIn("initial_model", self.kobold.admin_calls)
         self.assertIn("model cleanup", (await self.status())["last_error"])
 
     async def test_disconnected_stream_is_drained_before_handoff(self) -> None:

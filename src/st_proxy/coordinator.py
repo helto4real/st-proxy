@@ -87,6 +87,7 @@ class HandoffCoordinator:
         self._active_chats = 0
         self._waiting_chats = 0
         self._waiting_images = 0
+        self._active_comfy_controls = 0
         self._fatal_error: str | None = None
         self._last_error: str | None = None
         self._active_prompt_id: str | None = None
@@ -111,12 +112,16 @@ class HandoffCoordinator:
             "active_chats": self._active_chats,
             "waiting_chats": self._waiting_chats,
             "waiting_images": self._waiting_images,
+            "active_comfy_controls": self._active_comfy_controls,
             "active_prompt_id": self._active_prompt_id,
             "last_error": self._last_error,
             "chat_available": not self._fatal_error and not self._closing,
             "llm_backend": self._llm.info.kind,
             "idle_timeout": self._config.idle_timeout,
             "idle_restore_scheduled": self._idle_restore_deadline is not None,
+            "comfy_route_policy": (
+                "compatible" if self._config.allow_unknown_comfy_routes else "strict"
+            ),
         }
 
     async def initialize(self) -> bool:
@@ -237,12 +242,43 @@ class HandoffCoordinator:
             raise HandoffError(outcome.error or "image handoff failed before submission")
         return outcome.response
 
+    @contextlib.asynccontextmanager
+    async def comfy_control_lease(self) -> AsyncIterator[None]:
+        async with self._condition:
+            if self._closing:
+                raise HandoffError("broker is shutting down")
+            if self._fatal_error:
+                raise HandoffError(self._fatal_error)
+            if self._owner is not GpuOwner.COMFY or self._state not in {
+                HandoffState.COMFY_READY,
+                HandoffState.IMAGE_ACTIVE,
+            }:
+                raise HandoffError("ComfyUI does not currently own the GPU")
+            self._cancel_idle_restore("ComfyUI control request arrived")
+            self._active_comfy_controls += 1
+            LOG.debug(
+                "ComfyUI control lease granted: active_controls=%s",
+                self._active_comfy_controls,
+            )
+
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._active_comfy_controls -= 1
+                LOG.debug(
+                    "ComfyUI control lease released: active_controls=%s",
+                    self._active_comfy_controls,
+                )
+                self._condition.notify_all()
+
     def _idle_restore_is_safe(self) -> bool:
         return (
             self._owner is GpuOwner.COMFY
             and self._state is HandoffState.COMFY_READY
             and not self._queue
             and not self._active_chats
+            and not self._active_comfy_controls
             and self._active_prompt_id is None
             and not self._closing
             and not self._fatal_error
@@ -440,14 +476,32 @@ class HandoffCoordinator:
         if self._owner is GpuOwner.LLM:
             return True
 
-        self._owner = GpuOwner.UNKNOWN
-        self._set_state(HandoffState.CLEANING_COMFY)
+        try:
+            async with self._condition:
+                self._owner = GpuOwner.UNKNOWN
+                self._set_state(HandoffState.CLEANING_COMFY)
+                async with asyncio.timeout(self._config.cleanup_timeout):
+                    while self._active_comfy_controls:
+                        await self._condition.wait()
+        except TimeoutError:
+            error = "timed out waiting for ComfyUI control requests to finish"
+            LOG.error(error)
+            errors.append(error)
+            self._record_errors(errors)
+            if not self._closing:
+                await self._mark_fatal("ComfyUI GPU release is not confirmed")
+            return False
+
         try:
             async with asyncio.timeout(self._config.cleanup_timeout):
                 await self._comfy.free_models()
         except Exception as exc:
-            LOG.warning("ComfyUI cleanup failed: %s", exc)
+            LOG.error("ComfyUI cleanup failed; GPU release is unconfirmed: %s", exc)
             errors.append(str(exc))
+            self._record_errors(errors)
+            if not self._closing:
+                await self._mark_fatal("ComfyUI GPU release is not confirmed")
+            return False
 
         self._set_state(HandoffState.RELOADING_LLM)
         try:

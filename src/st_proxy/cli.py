@@ -36,6 +36,18 @@ def _env_float(name: str, default: float) -> float:
     return float(value) if value is not None else default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = _env(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"ST_PROXY_{name} must be a boolean")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local SillyTavern VRAM handoff broker")
     parser.add_argument("--listen-host", default=_env("LISTEN_HOST", "127.0.0.1"))
@@ -75,6 +87,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--poll-interval", type=float, default=_env_float("POLL_INTERVAL", 0.5))
     parser.add_argument(
+        "--allow-unknown-comfy-routes",
+        action="store_true",
+        default=_env_bool("ALLOW_UNKNOWN_COMFY_ROUTES"),
+        help=(
+            "pass unclassified mutating ComfyUI routes through without GPU coordination; "
+            "disabled by default"
+        ),
+    )
+    parser.add_argument(
         "--check-backend",
         action="store_true",
         help="validate the configured LLM lifecycle API and exit",
@@ -108,6 +129,7 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         cleanup_timeout=args.cleanup_timeout,
         idle_timeout=args.idle_timeout,
         poll_interval=args.poll_interval,
+        allow_unknown_comfy_routes=args.allow_unknown_comfy_routes,
     )
 
 

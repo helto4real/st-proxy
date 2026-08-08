@@ -32,6 +32,11 @@ SillyTavern connects to two proxy ports:
 | Chat | `http://127.0.0.1:5001` | Selected LLM backend |
 | Images | `http://127.0.0.1:8188` | ComfyUI at `http://127.0.0.1:8189` |
 
+The image URL is also the browser URL for proxied ComfyUI access. The gateway
+forwards the interface, uploads, previews, API responses, and live WebSocket
+updates without changing GPU ownership. Only a workflow submission requests a
+ComfyUI GPU lease.
+
 The proxy starts with the selected LLM owning the GPU. When an image reaches the front
 of the queue, it:
 
@@ -302,12 +307,14 @@ Immediately after startup, expect:
   "state": "llm_ready",
   "gpu_owner": "llm",
   "active_chats": 0,
+  "active_comfy_controls": 0,
   "waiting_chats": 0,
   "waiting_images": 0,
   "active_prompt_id": null,
   "last_error": null,
   "chat_available": true,
-  "llm_backend": "koboldcpp"
+  "llm_backend": "koboldcpp",
+  "comfy_route_policy": "strict"
 }
 ```
 
@@ -347,6 +354,7 @@ The chat starts after the original LLM model is verified.
 | `state` | Current handoff or processing stage |
 | `gpu_owner` | `llm`, `comfy`, or `null` while ownership is being changed or is unknown |
 | `active_chats` | Chat requests currently using the selected LLM |
+| `active_comfy_controls` | Cancellation/control requests currently using the ComfyUI control plane |
 | `waiting_chats` | Chat requests still waiting in the FIFO queue |
 | `waiting_images` | Image requests still waiting in the FIFO queue |
 | `active_prompt_id` | ComfyUI prompt currently being monitored, or `null` |
@@ -355,6 +363,7 @@ The chat starts after the original LLM model is verified.
 | `llm_backend` | Selected lifecycle adapter, such as `koboldcpp` or `ollama` |
 | `idle_timeout` | Configured ComfyUI idle period in seconds |
 | `idle_restore_scheduled` | Whether the broker is currently counting down to an idle LLM restore |
+| `comfy_route_policy` | `strict` by default, or `compatible` when unknown mutations are explicitly allowed |
 
 `waiting_chats` and `waiting_images` count queued work. The request currently
 being activated or processed is not included in those counters.
@@ -412,6 +421,7 @@ environment.
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds | Maximum ComfyUI cleanup time |
 | `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds | ComfyUI idle period before proactively restoring the LLM |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds | Backend state polling interval |
+| `--allow-unknown-comfy-routes` | `ST_PROXY_ALLOW_UNKNOWN_COMFY_ROUTES` | disabled | Pass unclassified trusted custom-node mutations through without coordination |
 | `--check-backend` | — | disabled | Check LLM control and readiness, then exit |
 | `--backend-check-timeout` | `ST_PROXY_BACKEND_CHECK_TIMEOUT` | `2` seconds | Readiness-command timeout |
 | `--log-level` | `ST_PROXY_LOG_LEVEL` | `INFO` | Python logging level |
@@ -569,6 +579,14 @@ Recheck both SillyTavern URLs:
 
 Do not configure SillyTavern with the real LLM or ComfyUI ports.
 
+### A custom-node web action gets HTTP 403
+
+Strict mode rejects mutating routes it cannot classify because such a route may
+run GPU work outside `/prompt`. Prefer adding and reviewing an explicit route
+classification. For a trusted extension that requires broad compatibility, set
+`ST_PROXY_ALLOW_UNKNOWN_COMFY_ROUTES=true`; this weakens the GPU-ownership
+boundary for those routes.
+
 ## Security and privacy
 
 - Loopback is the safe default.
@@ -580,6 +598,10 @@ Do not configure SillyTavern with the real LLM or ComfyUI ports.
 - Upstream URLs containing embedded credentials are rejected.
 - Request bodies, prompts, generated content, model names, and authorization
   headers are not logged.
+- For a hard single-ingress boundary, place the real backends on an internal
+  container/network-namespace network and expose only the broker listeners.
+- The broker coordinates VRAM lifecycle APIs; it does not revoke CUDA device
+  access at the operating-system level.
 
 ## Optional local stack supervisor
 

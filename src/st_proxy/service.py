@@ -7,15 +7,15 @@ from typing import Any
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 
 from .comfy import ComfyClient
+from .comfy_routes import ComfyRouteKind, classify_comfy_route
 from .config import BrokerConfig
 from .coordinator import HandoffCoordinator
-from .errors import BrokerError, ChatUnavailable
-from .http import filtered_request_headers, proxy_stream
+from .errors import BrokerError, ChatUnavailable, HandoffError
+from .http import proxy_stream, proxy_websocket, upstream_request_headers
 from .llm import LlmBackend, build_llm_backend
 
 LOG = logging.getLogger(__name__)
 STATUS_PATH = "/broker/status"
-PROMPT_PATHS = frozenset({"/prompt"})
 
 
 def _is_routine_comfy_poll(request: web.Request) -> bool:
@@ -152,10 +152,44 @@ class BrokerService:
             request.method,
             request.path,
         )
-        if request.method == "POST" and request.path in PROMPT_PATHS:
+        route_kind = classify_comfy_route(request.method, request.path)
+        if route_kind is ComfyRouteKind.LIFECYCLE:
+            LOG.warning(
+                "request rejected: target=ComfyUI method=%s path=%s status=403 "
+                "reason=broker-managed lifecycle endpoint duration=%.3fs",
+                request.method,
+                request.path,
+                time.monotonic() - started,
+            )
+            return web.json_response(
+                {"error": "ComfyUI lifecycle endpoints are managed by the broker"},
+                status=403,
+            )
+        if (
+            route_kind is ComfyRouteKind.UNKNOWN_MUTATION
+            and not self.config.allow_unknown_comfy_routes
+        ):
+            LOG.warning(
+                "request rejected: target=ComfyUI method=%s path=%s status=403 "
+                "reason=unclassified mutating route duration=%.3fs",
+                request.method,
+                request.path,
+                time.monotonic() - started,
+            )
+            return web.json_response(
+                {
+                    "error": (
+                        "unclassified mutating ComfyUI route rejected by strict proxy policy"
+                    )
+                },
+                status=403,
+            )
+        if route_kind is ComfyRouteKind.WORKFLOW:
             try:
                 body = await request.read()
-                headers = dict(filtered_request_headers(request).items())
+                headers = dict(
+                    upstream_request_headers(request, self.config.comfy_url).items()
+                )
                 response = await self.coordinator.submit_image(
                     path=request.path,
                     query_string=request.query_string,
@@ -182,7 +216,14 @@ class BrokerService:
                 )
                 return web.json_response({"error": str(exc)}, status=503)
         try:
-            response = await proxy_stream(request, self.session, self.config.comfy_url)
+            is_websocket = request.headers.get("Upgrade", "").lower() == "websocket"
+            if is_websocket:
+                response = await proxy_websocket(request, self.session, self.config.comfy_url)
+            elif route_kind is ComfyRouteKind.CONTROL:
+                async with self.coordinator.comfy_control_lease():
+                    response = await proxy_stream(request, self.session, self.config.comfy_url)
+            else:
+                response = await proxy_stream(request, self.session, self.config.comfy_url)
             request_log(
                 "request completed: target=ComfyUI method=%s path=%s status=%s duration=%.3fs",
                 request.method,
@@ -191,6 +232,16 @@ class BrokerService:
                 time.monotonic() - started,
             )
             return response
+        except HandoffError as exc:
+            LOG.warning(
+                "request rejected: target=ComfyUI method=%s path=%s status=409 reason=%s "
+                "duration=%.3fs",
+                request.method,
+                request.path,
+                exc,
+                time.monotonic() - started,
+            )
+            return web.json_response({"error": str(exc)}, status=409)
         except (BrokerError, ClientError, TimeoutError) as exc:
             LOG.warning(
                 "request failed: target=ComfyUI method=%s path=%s status=502 error=%s "

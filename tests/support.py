@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from aiohttp import web
+from aiohttp import WSMsgType, web
 
 
 async def wait_until(predicate, timeout_seconds: float = 2.0) -> None:
@@ -127,6 +127,9 @@ class MockComfy:
     failures: set[str] = field(default_factory=set)
     free_calls: int = 0
     interrupt_calls: int = 0
+    websocket_client_ids: list[str] = field(default_factory=list)
+    websocket_origins: list[str | None] = field(default_factory=list)
+    generic_requests: list[tuple[str, str]] = field(default_factory=list)
 
     def app(self) -> web.Application:
         app = web.Application()
@@ -135,6 +138,7 @@ class MockComfy:
         app.router.add_get("/history/{prompt_id}", self.history)
         app.router.add_post("/free", self.free)
         app.router.add_post("/interrupt", self.interrupt)
+        app.router.add_get("/ws", self.websocket)
         app.router.add_route("*", "/{tail:.*}", self.generic)
         return app
 
@@ -182,9 +186,39 @@ class MockComfy:
     async def interrupt(self, _request: web.Request) -> web.Response:
         self.interrupt_calls += 1
         self.events.append("interrupt")
+        for prompt_id, event in self.completion.items():
+            if not event.is_set():
+                self.failures.add(prompt_id)
+                event.set()
         return web.json_response({"ok": True})
 
+    async def websocket(self, request: web.Request) -> web.WebSocketResponse:
+        client_id = request.query.get("clientId", "")
+        self.websocket_client_ids.append(client_id)
+        self.websocket_origins.append(request.headers.get("Origin"))
+        response = web.WebSocketResponse()
+        await response.prepare(request)
+        await response.send_json({"type": "status", "client_id": client_id})
+        async for message in response:
+            if message.type is WSMsgType.TEXT:
+                await response.send_str(f"upstream:{message.data}")
+            elif message.type is WSMsgType.BINARY:
+                await response.send_bytes(b"upstream:" + message.data)
+        return response
+
     async def generic(self, _request: web.Request) -> web.Response:
+        self.generic_requests.append((_request.method, _request.path))
+        if _request.path == "/redirect-to-history":
+            raise web.HTTPFound(
+                f"{_request.scheme}://{_request.host}/history?from=upstream"
+            )
+        if _request.path == "/inspect-origin":
+            return web.json_response(
+                {
+                    "origin": _request.headers.get("Origin"),
+                    "referer": _request.headers.get("Referer"),
+                }
+            )
         return web.json_response({"ok": True})
 
 

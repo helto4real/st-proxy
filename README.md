@@ -10,14 +10,19 @@ Supported LLM backends:
 - Ollama, controlled through `/api/ps` and the `keep_alive` lifecycle API.
 
 New to the project? Start with the illustrated
-[user guide](docs/USER_GUIDE.md).
+[user guide](docs/USER_GUIDE.md). The gateway and lease boundaries are described
+in [Gateway and GPU lease architecture](docs/GATEWAY_AND_GPU_LEASES.md).
 
 ```text
 SillyTavern chat  -> 127.0.0.1:5001 -> broker -> selected LLM backend
 SillyTavern image -> 127.0.0.1:8188 -> broker -> ComfyUI   127.0.0.1:8189
+Browser ComfyUI   -> 127.0.0.1:8188 -> broker -> ComfyUI HTTP + WebSocket
 ```
 
-Chat and ComfyUI `POST /prompt` requests enter one FIFO queue. The broker changes
+The image listener is a full ComfyUI gateway for HTTP and WebSocket traffic.
+Browsing the interface, uploading inputs, and receiving live `/ws` updates do
+not change GPU ownership. Chat and ComfyUI workflow submissions enter one FIFO
+queue. The broker changes
 GPU ownership only when the request at the head of that queue needs the other
 backend. When switching to ComfyUI, it drains active chat responses (including
 streams), asks the selected adapter to release its GPU resources, and waits for
@@ -40,8 +45,13 @@ For KoboldCpp, startup verifies Model Administration and the `unload_model` and
 `initial_model` options. For Ollama, startup requires exactly one model in
 `/api/ps`; this makes the restore target deterministic.
 
-If the final LLM readiness check fails, chat remains fail-closed and gets HTTP
-503. The latest error is visible at `GET /broker/status` on either broker port.
+If ComfyUI cleanup or the final LLM readiness check fails, chat remains
+fail-closed and gets HTTP 503. The latest error is visible at
+`GET /broker/status` on either broker port.
+
+The broker owns ComfyUI lifecycle routes such as `POST /free`. Unknown mutating
+custom-node routes are rejected by default because they may perform GPU work
+outside the workflow queue. Compatibility passthrough is an explicit opt-in.
 
 ## Requirements
 
@@ -174,6 +184,8 @@ st-vram-proxy
    `http://127.0.0.1:8188`.
 3. Keep the real LLM and ComfyUI on their upstream ports. SillyTavern should not
    point directly to either upstream.
+4. Open the ComfyUI browser interface through the proxy image URL when you want
+   all browser HTTP and WebSocket traffic to use the same gateway.
 
 No SillyTavern, LLM-backend, or ComfyUI source changes are needed.
 
@@ -190,6 +202,7 @@ Example idle response:
   "state": "llm_ready",
   "gpu_owner": "llm",
   "active_chats": 0,
+  "active_comfy_controls": 0,
   "waiting_chats": 0,
   "waiting_images": 0,
   "active_prompt_id": null,
@@ -197,7 +210,8 @@ Example idle response:
   "chat_available": true,
   "llm_backend": "koboldcpp",
   "idle_timeout": 60.0,
-  "idle_restore_scheduled": false
+  "idle_restore_scheduled": false,
+  "comfy_route_policy": "strict"
 }
 ```
 
@@ -222,6 +236,7 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds |
 | `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds |
+| `--allow-unknown-comfy-routes` | `ST_PROXY_ALLOW_UNKNOWN_COMFY_ROUTES` | disabled |
 | `--check-backend` | — | disabled |
 | `--backend-check-timeout` | `ST_PROXY_BACKEND_CHECK_TIMEOUT` | `2` seconds |
 | `--log-level` | `ST_PROXY_LOG_LEVEL` | `INFO` |
@@ -229,6 +244,12 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 `--kobold-url` and `ST_PROXY_KOBOLD_URL` remain compatibility aliases for the
 generic LLM origin. Backend defaults are `http://127.0.0.1:5002` for KoboldCpp
 and `http://127.0.0.1:11434` for Ollama.
+
+Strict ComfyUI route policy coordinates workflow and cancellation routes,
+reserves lifecycle routes for the broker, and rejects unclassified mutations.
+Use `--allow-unknown-comfy-routes` only for a trusted custom extension whose
+mutating routes you have reviewed. Those routes are passed through without GPU
+coordination.
 
 ## Adding another LLM backend
 
@@ -259,6 +280,12 @@ generated content, or authorization values. ComfyUI confirms that `/free`
 completed but does not report an exact number of bytes freed.
 High-frequency successful ComfyUI `GET /history` polling is logged only at
 `DEBUG`; failures remain visible at `WARNING`.
+
+The broker enforces logical GPU ownership through verified application
+lifecycle APIs; it is not a kernel GPU access-control layer. For a hard
+single-ingress boundary, keep backend ports on an internal container or network
+namespace and publish only the two broker ports. A second loopback port prevents
+accidental use but does not prevent another local process from connecting to it.
 
 ## Automated tests: isolated and safe
 
