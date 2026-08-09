@@ -49,13 +49,11 @@ If ComfyUI cleanup or the final LLM readiness check fails, chat remains
 fail-closed and gets HTTP 503. The latest error is visible at
 `GET /broker/status` on either broker port.
 
-The broker owns ComfyUI lifecycle routes such as `POST /free`. Unknown mutating
-custom-node routes are rejected by default because they may perform GPU work
-outside the workflow queue. Reviewed non-GPU routes in the Helto privacy,
-utility, Director, Smart Prompt, and all-in-one image-generation packs are
-method-scoped passthrough exceptions. Reviewed release/unload routes are
-allowed only while ComfyUI owns the GPU. Compatibility passthrough is an
-explicit opt-in for everything else.
+The broker owns ComfyUI lifecycle routes such as `POST /free`, coordinates
+workflow and control routes, and transparently forwards every other ComfyUI
+HTTP/WebSocket route by default. This avoids per-node allowlist maintenance.
+Reviewed release/unload routes are allowed only while ComfyUI owns the GPU, and
+known routes that start GPU work outside the workflow queue remain blocked.
 
 ## Requirements
 
@@ -215,7 +213,7 @@ Example idle response:
   "llm_backend": "koboldcpp",
   "idle_timeout": 60.0,
   "idle_restore_scheduled": false,
-  "comfy_route_policy": "strict"
+  "comfy_route_policy": "transparent"
 }
 ```
 
@@ -240,7 +238,7 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds |
 | `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds |
-| `--allow-unknown-comfy-routes` | `ST_PROXY_ALLOW_UNKNOWN_COMFY_ROUTES` | disabled |
+| `--strict-comfy-routes` | `ST_PROXY_STRICT_COMFY_ROUTES` | disabled |
 | `--check-backend` | — | disabled |
 | `--backend-check-timeout` | `ST_PROXY_BACKEND_CHECK_TIMEOUT` | `2` seconds |
 | `--log-level` | `ST_PROXY_LOG_LEVEL` | `INFO` |
@@ -249,12 +247,14 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 generic LLM origin. Backend defaults are `http://127.0.0.1:5002` for KoboldCpp
 and `http://127.0.0.1:11434` for Ollama.
 
-Strict ComfyUI route policy coordinates workflow and cancellation routes,
-reserves lifecycle routes for the broker, and rejects unclassified mutations.
-Use `--allow-unknown-comfy-routes` only for a trusted custom extension whose
-mutating routes you have reviewed. Those routes are passed through without GPU
-coordination. Helto Director prompt-optimizer execution remains blocked in
-strict mode because it can start GPU work outside the normal workflow queue.
+The default transparent ComfyUI route policy forwards unclassified extension
+routes without GPU coordination. Use `--strict-comfy-routes` only when you want
+the historical reviewed-route allowlist. Workflow and cancellation routes are
+still coordinated, lifecycle routes remain broker-owned, and Helto Director
+prompt-optimizer execution remains blocked in every mode because it can start
+GPU work outside the normal workflow queue. The old
+`--allow-unknown-comfy-routes` option remains a compatibility alias for the
+default behavior.
 
 ## Adding another LLM backend
 

@@ -17,7 +17,7 @@ def test_default_cli_uses_koboldcpp_compatibility_defaults() -> None:
     assert config.llm_backend == "koboldcpp"
     assert config.llm_url == "http://127.0.0.1:5002"
     assert config.idle_timeout == 60
-    assert not config.allow_unknown_comfy_routes
+    assert config.allow_unknown_comfy_routes
 
 
 def test_ollama_cli_uses_backend_specific_default_origin() -> None:
@@ -52,7 +52,20 @@ def test_idle_timeout_cli_option_maps_to_config() -> None:
     assert config.idle_timeout == 12.5
 
 
-def test_unknown_comfy_route_compatibility_is_explicit() -> None:
+def test_strict_comfy_route_policy_is_explicit() -> None:
+    config = _parse("--strict-comfy-routes")
+
+    assert not config.allow_unknown_comfy_routes
+
+
+def test_legacy_allow_unknown_comfy_route_flag_keeps_transparent_policy() -> None:
     config = _parse("--allow-unknown-comfy-routes")
 
     assert config.allow_unknown_comfy_routes
+
+
+def test_strict_comfy_route_environment_setting_is_supported() -> None:
+    with patch.dict(os.environ, {"ST_PROXY_STRICT_COMFY_ROUTES": "true"}, clear=True):
+        config = config_from_args(build_parser().parse_args(()))
+
+    assert not config.allow_unknown_comfy_routes

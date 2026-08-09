@@ -77,7 +77,7 @@ class BrokerConfig:
     cleanup_timeout: float = 60.0
     idle_timeout: float = 60.0
     poll_interval: float = 0.5
-    allow_unknown_comfy_routes: bool = False
+    allow_unknown_comfy_routes: bool = True
     test_mode: bool = False
     test_registry: TestEndpointRegistry | None = field(default=None, repr=False, compare=False)
 

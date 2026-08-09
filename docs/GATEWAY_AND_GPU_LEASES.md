@@ -37,27 +37,34 @@ The gateway classifies each request before forwarding it:
 | Control | `/interrupt`, `/queue`, their `/api` aliases, job cancellation, reviewed release/unload routes | Allowed only while ComfyUI owns the GPU; holds a short control lease |
 | Lifecycle | `/free`, `/api/free` | Broker-internal; external calls get HTTP 403 |
 | Known UI mutation | uploads, settings, userdata, history, reviewed custom-node operations | Transparent passthrough |
-| Unknown mutation | custom extension route | HTTP 403 in strict mode |
+| Unknown mutation | new or updated custom-extension route | Transparent passthrough by default; no GPU handoff |
+| Known uncoordinated GPU route | Director prompt-optimizer execution | Always HTTP 403 |
 
-`--allow-unknown-comfy-routes` changes only the final row to transparent
-passthrough. It is a compatibility escape hatch, not an ownership guarantee.
-Review custom routes before enabling it because an extension may allocate GPU
-memory without submitting a normal ComfyUI prompt.
+The transparent default keeps new and updated custom-node services working
+without changing a central allowlist. `--strict-comfy-routes` changes the
+unknown-mutation row to HTTP 403 and uses the historical reviewed-route list.
+The old `--allow-unknown-comfy-routes` option remains a compatibility alias for
+transparent mode.
 
-The reviewed non-GPU mutations from `helto-privacy`, `comfyui-utils`,
-`comfyui-helto-director`, `comfyui-helto-smartprompt`, and
-`comfyui-all-on-one-image-generation-node` are allowlisted by HTTP method and
-exact path or narrow path pattern. This includes privacy, settings, library,
-media-browser, selector, queue-manager, prompt-library, folder, and metadata
-operations. Their namespaces are not allowlisted as prefixes, so a new method
-or route still fails closed until it has been reviewed.
+Strict mode still recognizes reviewed non-GPU mutations from `helto-privacy`,
+`comfyui-utils`, `comfyui-helto-director`, `comfyui-helto-smartprompt`, and
+`comfyui-all-on-one-image-generation-node`. They are allowlisted by HTTP method
+and exact path or narrow path pattern. This includes privacy, settings,
+library, media-browser, selector, queue-manager, prompt-library, folder, and
+metadata operations. This list no longer affects normal transparent operation.
 
 Reviewed model-release and unload operations use the control class and are
 accepted only while ComfyUI owns the GPU. Director prompt-optimizer execution
 at `/helto_director/prompt_optimizer/optimize` and `/optimize/start` remains
-blocked in strict mode: it can start GPU work outside ComfyUI's normal
+blocked in every mode: it can start GPU work outside ComfyUI's normal
 `/prompt` and history lifecycle, so it needs a separate coordinated lease
 design before it can be enabled safely.
+
+Transparent passthrough is not an ownership guarantee for an unknown extension
+that starts CUDA work through its own endpoint. Such an endpoint must be added
+to the small GPU-sensitive block/control set or given a dedicated coordinator
+contract. The tradeoff is deliberate: routine web and storage services require
+no central maintenance, while known GPU entry points remain explicit.
 
 For compatibility with ComfyUI backends that expose only the legacy route
 names, the gateway translates the frontend aliases `/api/free`,

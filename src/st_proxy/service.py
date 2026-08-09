@@ -166,6 +166,23 @@ class BrokerService:
                 {"error": "ComfyUI lifecycle endpoints are managed by the broker"},
                 status=403,
             )
+        if route_kind is ComfyRouteKind.BLOCKED_GPU:
+            LOG.warning(
+                "request rejected: target=ComfyUI method=%s path=%s status=403 "
+                "reason=uncoordinated GPU route duration=%.3fs",
+                request.method,
+                request.path,
+                time.monotonic() - started,
+            )
+            return web.json_response(
+                {
+                    "error": (
+                        "ComfyUI route blocked because it can start GPU work outside "
+                        "the workflow coordinator"
+                    )
+                },
+                status=403,
+            )
         if (
             route_kind is ComfyRouteKind.UNKNOWN_MUTATION
             and not self.config.allow_unknown_comfy_routes

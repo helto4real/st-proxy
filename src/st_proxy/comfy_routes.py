@@ -9,6 +9,7 @@ class ComfyRouteKind(StrEnum):
     WORKFLOW = "workflow"
     CONTROL = "control"
     LIFECYCLE = "lifecycle"
+    BLOCKED_GPU = "blocked_gpu"
     UNKNOWN_MUTATION = "unknown_mutation"
 
 
@@ -36,6 +37,15 @@ LIFECYCLE_ROUTES = frozenset(
     {
         ("POST", "/free"),
         ("POST", "/api/free"),
+    }
+)
+BLOCKED_GPU_ROUTES = frozenset(
+    {
+        # These Director endpoints may load a model and start work outside
+        # ComfyUI's /prompt plus history lifecycle. They need a dedicated
+        # coordinator contract before they can safely share the GPU.
+        ("POST", "/helto_director/prompt_optimizer/optimize"),
+        ("POST", "/helto_director/prompt_optimizer/optimize/start"),
     }
 )
 
@@ -226,6 +236,8 @@ def classify_comfy_route(method: str, path: str) -> ComfyRouteKind:
         return ComfyRouteKind.CONTROL
     if route in LIFECYCLE_ROUTES:
         return ComfyRouteKind.LIFECYCLE
+    if route in BLOCKED_GPU_ROUTES:
+        return ComfyRouteKind.BLOCKED_GPU
     if _is_safe_core_mutation(normalized_method, path) or _is_safe_custom_mutation(
         normalized_method, path
     ):

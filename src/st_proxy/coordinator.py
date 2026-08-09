@@ -120,7 +120,7 @@ class HandoffCoordinator:
             "idle_timeout": self._config.idle_timeout,
             "idle_restore_scheduled": self._idle_restore_deadline is not None,
             "comfy_route_policy": (
-                "compatible" if self._config.allow_unknown_comfy_routes else "strict"
+                "transparent" if self._config.allow_unknown_comfy_routes else "strict"
             ),
         }
 

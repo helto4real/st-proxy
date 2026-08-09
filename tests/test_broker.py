@@ -263,15 +263,16 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.comfy.free_calls, free_calls)
 
-    async def test_unknown_comfy_mutation_fails_closed_by_default(self) -> None:
+    async def test_unknown_comfy_mutation_passes_through_by_default(self) -> None:
         async with self.client.post(f"{self.image_url}/custom-node/run-model") as response:
-            self.assertEqual(response.status, 403)
+            self.assertEqual(response.status, 200)
 
-        self.assertNotIn(
+        self.assertIn(
             ("POST", "/custom-node/run-model"),
             self.comfy.generic_requests,
         )
-        self.assertEqual((await self.status())["comfy_route_policy"], "strict")
+        self.assertEqual((await self.status())["comfy_route_policy"], "transparent")
+        self.assertEqual(self.kobold.admin_calls, [])
 
     async def test_helto_privacy_decrypt_passes_without_gpu_handoff(self) -> None:
         async with self.client.post(
@@ -329,22 +330,22 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(("POST", path), self.comfy.generic_requests)
 
-    async def test_unknown_comfy_mutation_can_be_enabled_explicitly(self) -> None:
+    async def test_unknown_comfy_mutation_can_be_rejected_in_strict_mode(self) -> None:
         await self.service.stop()
         self.config = BrokerConfig.for_test(
             kobold_url=self.kobold_server.url,
             comfy_url=self.comfy_server.url,
             registry=self.registry,
-            allow_unknown_comfy_routes=True,
+            allow_unknown_comfy_routes=False,
         )
         self.service = BrokerService(self.config)
         await self.service.start()
 
         async with self.client.post(f"{self.image_url}/custom-node/settings") as response:
-            self.assertEqual(response.status, 200)
+            self.assertEqual(response.status, 403)
 
-        self.assertIn(("POST", "/custom-node/settings"), self.comfy.generic_requests)
-        self.assertEqual((await self.status())["comfy_route_policy"], "compatible")
+        self.assertNotIn(("POST", "/custom-node/settings"), self.comfy.generic_requests)
+        self.assertEqual((await self.status())["comfy_route_policy"], "strict")
 
     async def test_api_interrupt_alias_is_coordinated_with_active_comfy_workflow(self) -> None:
         self.comfy.auto_complete = False

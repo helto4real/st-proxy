@@ -48,6 +48,12 @@ def _env_bool(name: str, default: bool = False) -> bool:
     raise ValueError(f"ST_PROXY_{name} must be a boolean")
 
 
+def _allow_unknown_comfy_routes_default() -> bool:
+    if _env("STRICT_COMFY_ROUTES") is not None:
+        return not _env_bool("STRICT_COMFY_ROUTES")
+    return _env_bool("ALLOW_UNKNOWN_COMFY_ROUTES", True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Local SillyTavern VRAM handoff broker")
     parser.add_argument("--listen-host", default=_env("LISTEN_HOST", "127.0.0.1"))
@@ -86,13 +92,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="restore the selected LLM after ComfyUI has been idle for this many seconds",
     )
     parser.add_argument("--poll-interval", type=float, default=_env_float("POLL_INTERVAL", 0.5))
-    parser.add_argument(
+    route_policy = parser.add_mutually_exclusive_group()
+    route_policy.add_argument(
+        "--strict-comfy-routes",
+        action="store_false",
+        dest="allow_unknown_comfy_routes",
+        default=_allow_unknown_comfy_routes_default(),
+        help="reject unclassified mutating ComfyUI routes; disabled by default",
+    )
+    route_policy.add_argument(
         "--allow-unknown-comfy-routes",
         action="store_true",
-        default=_env_bool("ALLOW_UNKNOWN_COMFY_ROUTES"),
+        dest="allow_unknown_comfy_routes",
         help=(
-            "pass unclassified mutating ComfyUI routes through without GPU coordination; "
-            "disabled by default"
+            "compatibility alias for the default transparent ComfyUI route policy"
         ),
     )
     parser.add_argument(

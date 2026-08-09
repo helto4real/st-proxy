@@ -59,7 +59,7 @@ def test_control_and_lifecycle_routes_are_distinct() -> None:
     assert classify_comfy_route("POST", "/api/free") is ComfyRouteKind.LIFECYCLE
 
 
-def test_known_ui_mutations_pass_but_unknown_custom_mutations_fail_closed() -> None:
+def test_known_ui_mutations_and_unknown_custom_mutations_are_distinct() -> None:
     assert classify_comfy_route("POST", "/upload/image") is ComfyRouteKind.PASSTHROUGH
     assert classify_comfy_route("POST", "/api/users") is ComfyRouteKind.PASSTHROUGH
     assert classify_comfy_route("PATCH", "/userdata/default/workflows/a.json") is (
@@ -198,9 +198,16 @@ def test_reviewed_custom_rules_remain_method_and_path_scoped() -> None:
         ("POST", "/helto_director/library/projects/synthetic-id/run-model"),
         ("POST", "/helto_director/media_browser/model/folders"),
         ("POST", "/aio_image_generate/ideogram4_prompt_library/prompts/id/render"),
-        ("POST", "/helto_director/prompt_optimizer/optimize"),
-        ("POST", "/helto_director/prompt_optimizer/optimize/start"),
     )
 
     for method, path in unknown_routes:
         assert classify_comfy_route(method, path) is ComfyRouteKind.UNKNOWN_MUTATION
+
+
+def test_known_uncoordinated_gpu_routes_are_explicitly_blocked() -> None:
+    assert classify_comfy_route(
+        "POST", "/helto_director/prompt_optimizer/optimize"
+    ) is ComfyRouteKind.BLOCKED_GPU
+    assert classify_comfy_route(
+        "POST", "/helto_director/prompt_optimizer/optimize/start"
+    ) is ComfyRouteKind.BLOCKED_GPU
