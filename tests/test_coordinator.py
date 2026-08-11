@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from st_proxy.comfy import PromptResult
 from st_proxy.config import BrokerConfig
 from st_proxy.coordinator import HandoffCoordinator
-from st_proxy.errors import ChatUnavailable, HandoffError, UpstreamError
+from st_proxy.errors import ChatUnavailable, HandoffError, QueueFull, UpstreamError
 from st_proxy.http import BufferedResponse
 from st_proxy.llm import BackendInfo
 
@@ -117,11 +117,14 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     async def restart_with_idle_timeout(self, idle_timeout: float) -> None:
+        await self.restart_with_config(idle_timeout=idle_timeout)
+
+    async def restart_with_config(self, **overrides: object) -> None:
         await self.coordinator.close()
         self.llm = FakeLlmBackend()
         self.comfy = FakeComfyClient()
         self.coordinator = HandoffCoordinator(
-            BrokerConfig(idle_timeout=idle_timeout),
+            BrokerConfig(**overrides),
             self.llm,
             self.comfy,  # type: ignore[arg-type]
         )
@@ -142,6 +145,52 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.comfy.calls, ["free", "submit", "wait", "free"])
         self.assertEqual(self.coordinator.status()["llm_backend"], "fake")
+        self.assertTrue(self.coordinator.status()["healthy"])
+        self.assertTrue(self.coordinator.status()["dispatcher_alive"])
+
+    async def test_cancelled_queued_image_releases_body_and_queue_capacity(self) -> None:
+        first = await self.submit_image()
+        self.assertEqual(first.status, 200)
+        await wait_until(lambda: self.coordinator.status()["state"] == "image_active")
+
+        abandoned = asyncio.create_task(self.submit_image())
+        await wait_until(lambda: self.coordinator.status()["waiting_images"] == 1)
+        self.assertEqual(self.coordinator.status()["queued_workflow_bytes"], 2)
+
+        abandoned.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await abandoned
+        await wait_until(lambda: self.coordinator.status()["waiting_images"] == 0)
+        self.assertEqual(self.coordinator.status()["queued_workflow_bytes"], 0)
+
+        self.comfy.completion.set()
+        await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+        self.assertEqual(self.comfy.calls.count("submit"), 1)
+
+    async def test_workflow_queue_rejects_requests_beyond_bounded_capacity(self) -> None:
+        await self.restart_with_config(max_queued_images=1)
+        first = await self.submit_image()
+        self.assertEqual(first.status, 200)
+        queued = asyncio.create_task(self.submit_image())
+        await wait_until(lambda: self.coordinator.status()["waiting_images"] == 1)
+
+        with self.assertRaisesRegex(QueueFull, "request limit"):
+            await self.submit_image()
+
+        queued.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await queued
+        self.comfy.completion.set()
+        await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+
+    async def test_workflow_body_limit_is_enforced_inside_coordinator(self) -> None:
+        await self.restart_with_config(
+            max_workflow_body_bytes=1,
+            max_queued_workflow_bytes=1,
+        )
+
+        with self.assertRaisesRegex(HandoffError, "size limit"):
+            await self.submit_image()
 
     async def test_active_chat_is_drained_before_generic_release(self) -> None:
         async with self.coordinator.chat_lease():
@@ -156,6 +205,22 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("release", self.llm.calls)
         self.comfy.completion.set()
         await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+
+    async def test_cancelled_image_stops_a_pending_gpu_handoff(self) -> None:
+        async with self.coordinator.chat_lease():
+            image_task = asyncio.create_task(self.submit_image())
+            await wait_until(
+                lambda: self.coordinator.status()["state"] == "draining_llm"
+            )
+            image_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await image_task
+            await wait_until(
+                lambda: self.coordinator.status()["state"] == "llm_ready"
+            )
+
+        self.assertNotIn("release", self.llm.calls)
+        self.assertEqual(self.comfy.calls, ["free"])
 
     async def test_release_failure_restores_generic_backend(self) -> None:
         self.llm.release_failures = 1

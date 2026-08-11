@@ -77,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=_env("KOBOLD_ADMIN_PASSWORD"),
         help="Prefer ST_PROXY_KOBOLD_ADMIN_PASSWORD to avoid shell history",
     )
+    parser.add_argument("--connect-timeout", type=float, default=_env_float("CONNECT_TIMEOUT", 30))
     parser.add_argument("--request-timeout", type=float, default=_env_float("REQUEST_TIMEOUT", 600))
     parser.add_argument("--image-timeout", type=float, default=_env_float("IMAGE_TIMEOUT", 1800))
     parser.add_argument(
@@ -92,6 +93,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="restore the selected LLM after ComfyUI has been idle for this many seconds",
     )
     parser.add_argument("--poll-interval", type=float, default=_env_float("POLL_INTERVAL", 0.5))
+    parser.add_argument(
+        "--comfy-poll-failure-limit",
+        type=int,
+        default=_env_int("COMFY_POLL_FAILURE_LIMIT", 6),
+    )
+    parser.add_argument(
+        "--max-workflow-body-bytes",
+        type=int,
+        default=_env_int("MAX_WORKFLOW_BODY_BYTES", 64 * 1024**2),
+    )
+    parser.add_argument(
+        "--max-queued-images",
+        type=int,
+        default=_env_int("MAX_QUEUED_IMAGES", 32),
+    )
+    parser.add_argument(
+        "--max-queued-workflow-bytes",
+        type=int,
+        default=_env_int("MAX_QUEUED_WORKFLOW_BYTES", 256 * 1024**2),
+    )
     route_policy = parser.add_mutually_exclusive_group()
     route_policy.add_argument(
         "--strict-comfy-routes",
@@ -134,6 +155,7 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         llm_url=llm_url,
         comfy_url=args.comfy_url,
         kobold_admin_password=args.kobold_admin_password,
+        connect_timeout=args.connect_timeout,
         request_timeout=args.request_timeout,
         image_timeout=args.image_timeout,
         chat_drain_timeout=args.chat_drain_timeout,
@@ -142,6 +164,10 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         cleanup_timeout=args.cleanup_timeout,
         idle_timeout=args.idle_timeout,
         poll_interval=args.poll_interval,
+        comfy_poll_failure_limit=args.comfy_poll_failure_limit,
+        max_workflow_body_bytes=args.max_workflow_body_bytes,
+        max_queued_images=args.max_queued_images,
+        max_queued_workflow_bytes=args.max_queued_workflow_bytes,
         allow_unknown_comfy_routes=args.allow_unknown_comfy_routes,
     )
 
@@ -151,12 +177,18 @@ async def check_backend(config: BrokerConfig, timeout_seconds: float) -> None:
         raise ConfigurationError("backend_check_timeout must be greater than zero")
     check_config = replace(
         config,
+        connect_timeout=min(config.connect_timeout, timeout_seconds),
         request_timeout=min(config.request_timeout, timeout_seconds),
         reload_timeout=min(config.reload_timeout, timeout_seconds),
         unload_timeout=min(config.unload_timeout, timeout_seconds),
         poll_interval=min(config.poll_interval, timeout_seconds),
     )
-    timeout = ClientTimeout(total=None, sock_connect=timeout_seconds)
+    timeout = ClientTimeout(
+        total=None,
+        connect=timeout_seconds,
+        sock_connect=timeout_seconds,
+        sock_read=timeout_seconds,
+    )
     async with ClientSession(
         timeout=timeout,
         connector=TCPConnector(force_close=True),

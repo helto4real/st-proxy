@@ -63,7 +63,9 @@ class ComfyClient:
     async def wait_for_prompt(self, prompt_id: str) -> None:
         started = time.monotonic()
         deadline = time.monotonic() + self._config.image_timeout
+        consecutive_failures = 0
         while time.monotonic() < deadline:
+            failure: str | None = None
             try:
                 per_request_timeout = min(
                     self._config.request_timeout, max(0.01, deadline - time.monotonic())
@@ -72,9 +74,16 @@ class ComfyClient:
                     async with self._session.get(
                         child_url(self._config.comfy_url, f"/history/{prompt_id}")
                     ) as response:
-                        if response.status < 400:
+                        if response.status >= 400:
+                            failure = f"HTTP {response.status}"
+                        else:
                             payload = await response.json(content_type=None)
-                            entry = payload.get(prompt_id) if isinstance(payload, dict) else None
+                            if not isinstance(payload, dict):
+                                failure = "invalid history response"
+                                entry = None
+                            else:
+                                consecutive_failures = 0
+                                entry = payload.get(prompt_id)
                             if isinstance(entry, dict):
                                 status = entry.get("status")
                                 if isinstance(status, dict):
@@ -111,8 +120,28 @@ class ComfyClient:
                                     return
             except UpstreamError:
                 raise
-            except (ClientError, TimeoutError, ValueError):
-                pass
+            except (ClientError, TimeoutError, ValueError) as exc:
+                failure = type(exc).__name__
+            if failure is not None:
+                consecutive_failures += 1
+                if consecutive_failures == 1:
+                    LOG.warning(
+                        "ComfyUI history monitoring failed; retrying: error=%s",
+                        failure,
+                    )
+                if consecutive_failures >= self._config.comfy_poll_failure_limit:
+                    LOG.error(
+                        "ComfyUI history monitoring aborted after consecutive failures: "
+                        "count=%s error=%s",
+                        consecutive_failures,
+                        failure,
+                    )
+                    await self.interrupt()
+                    raise backend_error(
+                        "ComfyUI",
+                        "history monitoring",
+                        f"{failure} after {consecutive_failures} consecutive failures",
+                    )
             await asyncio.sleep(self._config.poll_interval)
         await self.interrupt()
         raise backend_error("ComfyUI", "image job", "timed out")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from typing import Any
 
 from .comfy import ComfyClient
 from .config import BrokerConfig
-from .errors import ChatUnavailable, HandoffError
+from .errors import ChatUnavailable, HandoffError, QueueFull
 from .http import BufferedResponse
 from .llm import LlmBackend, RestorePoint
 
@@ -64,6 +65,7 @@ class ImageWork:
     headers: dict[str, str]
     body: bytes
     submitted: asyncio.Future[SubmissionOutcome]
+    cancelled: bool = False
 
 
 QueuedWork = ChatWork | ImageWork
@@ -87,12 +89,14 @@ class HandoffCoordinator:
         self._active_chats = 0
         self._waiting_chats = 0
         self._waiting_images = 0
+        self._queued_workflow_bytes = 0
         self._active_comfy_controls = 0
         self._fatal_error: str | None = None
         self._last_error: str | None = None
         self._active_prompt_id: str | None = None
         self._owner = GpuOwner.UNKNOWN
         self._state = HandoffState.INITIALIZING
+        self._state_changed_at = time.monotonic()
         self._closing = False
         self._dispatcher: asyncio.Task[None] | None = None
         self._idle_restore_deadline: float | None = None
@@ -102,16 +106,46 @@ class HandoffCoordinator:
             return
         previous = self._state
         self._state = state
+        self._state_changed_at = time.monotonic()
         LOG.info("state transition: %s -> %s", previous, state)
 
+    def _state_stall_timeout(self) -> float | None:
+        return {
+            HandoffState.VERIFYING_LLM: self._config.reload_timeout,
+            HandoffState.DRAINING_LLM: self._config.chat_drain_timeout,
+            HandoffState.UNLOADING_LLM: self._config.unload_timeout,
+            HandoffState.IMAGE_ACTIVE: (
+                self._config.image_timeout + self._config.request_timeout
+            ),
+            HandoffState.CLEANING_COMFY: self._config.cleanup_timeout * 2,
+            HandoffState.RELOADING_LLM: self._config.reload_timeout,
+        }.get(self._state)
+
     def status(self) -> dict[str, Any]:
+        state_age = max(0.0, time.monotonic() - self._state_changed_at)
+        stall_timeout = self._state_stall_timeout()
+        state_stalled = stall_timeout is not None and state_age > stall_timeout + 5
+        dispatcher_alive = self._dispatcher is not None and not self._dispatcher.done()
+        healthy = (
+            not self._fatal_error
+            and not self._closing
+            and dispatcher_alive
+            and not state_stalled
+        )
         owner = None if self._owner is GpuOwner.UNKNOWN else self._owner
         return {
             "state": self._state,
+            "state_age_seconds": round(state_age, 3),
+            "state_stalled": state_stalled,
+            "healthy": healthy,
+            "dispatcher_alive": dispatcher_alive,
             "gpu_owner": owner,
             "active_chats": self._active_chats,
             "waiting_chats": self._waiting_chats,
             "waiting_images": self._waiting_images,
+            "queued_workflow_bytes": self._queued_workflow_bytes,
+            "max_queued_images": self._config.max_queued_images,
+            "max_queued_workflow_bytes": self._config.max_queued_workflow_bytes,
             "active_comfy_controls": self._active_comfy_controls,
             "active_prompt_id": self._active_prompt_id,
             "last_error": self._last_error,
@@ -163,6 +197,29 @@ class HandoffCoordinator:
         self._sequence += 1
         return self._sequence
 
+    def _append_queued(self, work: QueuedWork) -> None:
+        self._queue.append(work)
+        if isinstance(work, ChatWork):
+            self._waiting_chats += 1
+        else:
+            self._waiting_images += 1
+            self._queued_workflow_bytes += len(work.body)
+
+    def _release_queue_accounting(self, work: QueuedWork) -> None:
+        if isinstance(work, ChatWork):
+            self._waiting_chats -= 1
+        else:
+            self._waiting_images -= 1
+            self._queued_workflow_bytes -= len(work.body)
+
+    def _remove_queued(self, work: QueuedWork) -> bool:
+        try:
+            self._queue.remove(work)
+        except ValueError:
+            return False
+        self._release_queue_accounting(work)
+        return True
+
     @contextlib.asynccontextmanager
     async def chat_lease(self) -> AsyncIterator[None]:
         loop = asyncio.get_running_loop()
@@ -173,8 +230,7 @@ class HandoffCoordinator:
                 raise ChatUnavailable(self._fatal_error)
             work = ChatWork(self._next_sequence(), loop.create_future())
             self._cancel_idle_restore(f"chat request arrived: sequence={work.sequence}")
-            self._queue.append(work)
-            self._waiting_chats += 1
+            self._append_queued(work)
             LOG.info(
                 "chat request queued: sequence=%s waiting_chats=%s",
                 work.sequence,
@@ -193,12 +249,7 @@ class HandoffCoordinator:
             async with self._condition:
                 if not entered:
                     work.cancelled = True
-                    try:
-                        self._queue.remove(work)
-                    except ValueError:
-                        pass
-                    else:
-                        self._waiting_chats -= 1
+                    self._remove_queued(work)
                 if work.granted:
                     work.granted = False
                     self._active_chats -= 1
@@ -219,6 +270,18 @@ class HandoffCoordinator:
                 raise HandoffError("broker is shutting down")
             if self._fatal_error:
                 raise HandoffError(self._fatal_error)
+            body_size = len(body)
+            if body_size > self._config.max_workflow_body_bytes:
+                raise HandoffError(
+                    "workflow request body exceeds the configured size limit"
+                )
+            if self._waiting_images >= self._config.max_queued_images:
+                raise QueueFull("workflow queue has reached its request limit")
+            if (
+                self._queued_workflow_bytes + body_size
+                > self._config.max_queued_workflow_bytes
+            ):
+                raise QueueFull("workflow queue has reached its memory limit")
             work = ImageWork(
                 self._next_sequence(),
                 path,
@@ -228,8 +291,7 @@ class HandoffCoordinator:
                 loop.create_future(),
             )
             self._cancel_idle_restore(f"image request arrived: sequence={work.sequence}")
-            self._queue.append(work)
-            self._waiting_images += 1
+            self._append_queued(work)
             LOG.info(
                 "image request queued: sequence=%s waiting_images=%s",
                 work.sequence,
@@ -237,7 +299,21 @@ class HandoffCoordinator:
             )
             self._condition.notify_all()
 
-        outcome = await asyncio.shield(work.submitted)
+        completed = False
+        try:
+            outcome = await asyncio.shield(work.submitted)
+            completed = True
+        finally:
+            if not completed:
+                async with self._condition:
+                    work.cancelled = True
+                    removed = self._remove_queued(work)
+                    if removed:
+                        LOG.info(
+                            "cancelled image request removed before submission: sequence=%s",
+                            work.sequence,
+                        )
+                    self._condition.notify_all()
         if outcome.response is None:
             raise HandoffError(outcome.error or "image handoff failed before submission")
         return outcome.response
@@ -317,10 +393,7 @@ class HandoffCoordinator:
                 return None
             self._cancel_idle_restore("queued work is ready to dispatch")
             work = self._queue.popleft()
-            if isinstance(work, ChatWork):
-                self._waiting_chats -= 1
-            else:
-                self._waiting_images -= 1
+            self._release_queue_accounting(work)
             return work
 
     async def _dispatch(self) -> None:
@@ -414,15 +487,28 @@ class HandoffCoordinator:
         errors: list[str] = []
         self._last_error = None
         try:
+            if work.cancelled:
+                self._resolve_image_error(work, "image request was cancelled")
+                return
             if self._owner is not GpuOwner.COMFY:
-                await self._activate_comfy()
+                activated = await self._activate_comfy(work)
+                if not activated:
+                    self._resolve_image_error(work, "image request was cancelled")
+                    return
+            if work.cancelled:
+                self._resolve_image_error(work, "image request was cancelled")
+                return
             self._set_state(HandoffState.IMAGE_ACTIVE)
-            result = await self._comfy.submit(
-                path=work.path,
-                query_string=work.query_string,
-                headers=work.headers,
-                body=work.body,
-            )
+            try:
+                result = await self._comfy.submit(
+                    path=work.path,
+                    query_string=work.query_string,
+                    headers=work.headers,
+                    body=work.body,
+                )
+            finally:
+                work.body = b""
+                work.headers.clear()
             if not work.submitted.done():
                 work.submitted.set_result(SubmissionOutcome(response=result.response))
             if result.response.status >= 400:
@@ -454,13 +540,23 @@ class HandoffCoordinator:
             self._active_prompt_id = None
             self._record_errors(errors)
 
-    async def _activate_comfy(self) -> None:
+    async def _activate_comfy(self, work: ImageWork) -> bool:
         async with self._condition:
             self._set_state(HandoffState.DRAINING_LLM)
             LOG.info("draining chat requests: active_chats=%s", self._active_chats)
             async with asyncio.timeout(self._config.chat_drain_timeout):
                 while self._active_chats:
+                    if work.cancelled:
+                        self._set_state(HandoffState.LLM_READY)
+                        LOG.info(
+                            "cancelled image request stopped before GPU handoff: sequence=%s",
+                            work.sequence,
+                        )
+                        return False
                     await self._condition.wait()
+            if work.cancelled:
+                self._set_state(HandoffState.LLM_READY)
+                return False
             LOG.info("chat requests drained")
 
         self._owner = GpuOwner.UNKNOWN
@@ -471,6 +567,7 @@ class HandoffCoordinator:
         self._owner = GpuOwner.COMFY
         self._set_state(HandoffState.COMFY_READY)
         LOG.info("GPU ownership transferred: owner=ComfyUI")
+        return True
 
     async def _restore_llm(self, errors: list[str]) -> bool:
         if self._owner is GpuOwner.LLM:
@@ -551,11 +648,10 @@ class HandoffCoordinator:
     def _fail_queued(self, error: str) -> None:
         while self._queue:
             work = self._queue.popleft()
+            self._release_queue_accounting(work)
             if isinstance(work, ChatWork):
-                self._waiting_chats -= 1
                 self._resolve_chat(work, error)
             else:
-                self._waiting_images -= 1
                 self._resolve_image_error(work, error)
 
     async def _restore_for_shutdown(self) -> None:

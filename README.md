@@ -49,6 +49,12 @@ If ComfyUI cleanup or the final LLM readiness check fails, chat remains
 fail-closed and gets HTTP 503. The latest error is visible at
 `GET /broker/status` on either broker port.
 
+Control traffic, chat streams, normal ComfyUI HTTP traffic, and ComfyUI
+WebSockets use independent connection pools. Pool acquisition and upstream
+read-idle waits are bounded, WebSockets use heartbeats, and abandoned workflow
+requests are removed before submission. Workflow request bodies and queued
+workflow memory are bounded independently of large streamed uploads.
+
 The broker owns ComfyUI lifecycle routes such as `POST /free`, coordinates
 workflow and control routes, and transparently forwards every other ComfyUI
 HTTP/WebSocket route by default. This avoids per-node allowlist maintenance.
@@ -202,11 +208,16 @@ Example idle response:
 ```json
 {
   "state": "llm_ready",
+  "state_age_seconds": 4.2,
+  "state_stalled": false,
+  "healthy": true,
+  "dispatcher_alive": true,
   "gpu_owner": "llm",
   "active_chats": 0,
   "active_comfy_controls": 0,
   "waiting_chats": 0,
   "waiting_images": 0,
+  "queued_workflow_bytes": 0,
   "active_prompt_id": null,
   "last_error": null,
   "chat_available": true,
@@ -230,7 +241,8 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` |
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset |
-| `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `600` seconds |
+| `--connect-timeout` | `ST_PROXY_CONNECT_TIMEOUT` | `30` seconds |
+| `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `600` seconds read-idle |
 | `--image-timeout` | `ST_PROXY_IMAGE_TIMEOUT` | `1800` seconds |
 | `--chat-drain-timeout` | `ST_PROXY_CHAT_DRAIN_TIMEOUT` | `1800` seconds |
 | `--unload-timeout` | `ST_PROXY_UNLOAD_TIMEOUT` | `180` seconds |
@@ -238,6 +250,10 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds |
 | `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds |
+| `--comfy-poll-failure-limit` | `ST_PROXY_COMFY_POLL_FAILURE_LIMIT` | `6` |
+| `--max-workflow-body-bytes` | `ST_PROXY_MAX_WORKFLOW_BODY_BYTES` | `67108864` |
+| `--max-queued-images` | `ST_PROXY_MAX_QUEUED_IMAGES` | `32` |
+| `--max-queued-workflow-bytes` | `ST_PROXY_MAX_QUEUED_WORKFLOW_BYTES` | `268435456` |
 | `--strict-comfy-routes` | `ST_PROXY_STRICT_COMFY_ROUTES` | disabled |
 | `--check-backend` | — | disabled |
 | `--backend-check-timeout` | `ST_PROXY_BACKEND_CHECK_TIMEOUT` | `2` seconds |

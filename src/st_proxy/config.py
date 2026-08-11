@@ -69,6 +69,7 @@ class BrokerConfig:
     kobold_url: InitVar[str | None] = None
     comfy_url: str = "http://127.0.0.1:8189"
     kobold_admin_password: str | None = None
+    connect_timeout: float = 30.0
     request_timeout: float = 600.0
     image_timeout: float = 1800.0
     chat_drain_timeout: float = 1800.0
@@ -77,6 +78,10 @@ class BrokerConfig:
     cleanup_timeout: float = 60.0
     idle_timeout: float = 60.0
     poll_interval: float = 0.5
+    comfy_poll_failure_limit: int = 6
+    max_workflow_body_bytes: int = 64 * 1024**2
+    max_queued_images: int = 32
+    max_queued_workflow_bytes: int = 256 * 1024**2
     allow_unknown_comfy_routes: bool = True
     test_mode: bool = False
     test_registry: TestEndpointRegistry | None = field(default=None, repr=False, compare=False)
@@ -98,6 +103,7 @@ class BrokerConfig:
             # Non-loopback is supported when explicitly requested, but the default stays safe.
             pass
         for name in (
+            "connect_timeout",
             "request_timeout",
             "image_timeout",
             "chat_drain_timeout",
@@ -109,6 +115,18 @@ class BrokerConfig:
         ):
             if getattr(self, name) <= 0:
                 raise ConfigurationError(f"{name} must be greater than zero")
+        for name in (
+            "comfy_poll_failure_limit",
+            "max_workflow_body_bytes",
+            "max_queued_images",
+            "max_queued_workflow_bytes",
+        ):
+            if getattr(self, name) <= 0:
+                raise ConfigurationError(f"{name} must be greater than zero")
+        if self.max_queued_workflow_bytes < self.max_workflow_body_bytes:
+            raise ConfigurationError(
+                "max_queued_workflow_bytes must be at least max_workflow_body_bytes"
+            )
         if self.test_mode:
             if self.chat_port != 0 or self.image_port != 0:
                 raise ConfigurationError("test mode requires dynamically allocated broker ports")
@@ -140,6 +158,7 @@ class BrokerConfig:
             comfy_url=comfy_url,
             test_mode=True,
             test_registry=registry,
+            connect_timeout=5,
             request_timeout=5,
             image_timeout=5,
             chat_drain_timeout=5,
@@ -148,5 +167,6 @@ class BrokerConfig:
             cleanup_timeout=5,
             idle_timeout=60,
             poll_interval=0.01,
+            comfy_poll_failure_limit=3,
         )
         return replace(config, **overrides) if overrides else config

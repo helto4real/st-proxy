@@ -14,5 +14,9 @@ class HandoffError(BrokerError):
     """Raised when a GPU handoff cannot complete safely."""
 
 
+class QueueFull(BrokerError):
+    """Raised when bounded broker queue capacity has been exhausted."""
+
+
 class ChatUnavailable(BrokerError):
     """Raised when the LLM is not in a verified usable state."""

@@ -121,6 +121,7 @@ class MockComfy:
     auto_complete: bool = True
     fail_next_job: bool = False
     cleanup_failures: int = 0
+    history_failures: int = 0
     prompt_calls: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
     completion: dict[str, asyncio.Event] = field(default_factory=dict)
@@ -158,6 +159,9 @@ class MockComfy:
         return web.json_response({"prompt_id": prompt_id, "number": len(self.prompt_calls)})
 
     async def history(self, request: web.Request) -> web.Response:
+        if self.history_failures:
+            self.history_failures -= 1
+            return web.json_response({"error": "synthetic history failure"}, status=503)
         prompt_id = request.match_info["prompt_id"]
         event = self.completion.get(prompt_id)
         if event is None or not event.is_set():

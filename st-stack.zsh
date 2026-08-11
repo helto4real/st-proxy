@@ -370,8 +370,8 @@ broker_healthy() {
     response=$(curl --silent --fail \
         --connect-timeout 0.5 --max-time 1 \
         "http://127.0.0.1:${PROXY_CHAT_PORT}/broker/status" 2>/dev/null) || return 1
-    [[ "${response}" == *'"chat_available": true'* ||
-        "${response}" == *'"chat_available":true'* ]]
+    [[ "${response}" == *'"healthy": true'* ||
+        "${response}" == *'"healthy":true'* ]]
 }
 
 pgid_file() {
@@ -860,7 +860,7 @@ monitor_stack() {
             fi
         done
         if ! broker_healthy; then
-            log "proxy reports the LLM backend unavailable; stopping the stack"
+            log "proxy reports an unhealthy or stalled coordinator; stopping the stack"
             return 1
         fi
         if ! service_running pockettts && ! pockettts_ready; then

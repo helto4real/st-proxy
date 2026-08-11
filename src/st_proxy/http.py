@@ -31,6 +31,8 @@ HOP_BY_HOP_HEADERS = frozenset(
 )
 
 LOG = logging.getLogger(__name__)
+WEBSOCKET_HEARTBEAT_SECONDS = 30.0
+MAX_WEBSOCKET_MESSAGE_BYTES = 64 * 1024**2
 
 
 def upstream_url(
@@ -217,6 +219,9 @@ async def proxy_websocket(
     request: web.Request,
     session: ClientSession,
     origin: str,
+    *,
+    heartbeat: float = WEBSOCKET_HEARTBEAT_SECONDS,
+    max_msg_size: int = MAX_WEBSOCKET_MESSAGE_BYTES,
 ) -> web.WebSocketResponse:
     protocols = tuple(
         protocol.strip()
@@ -227,12 +232,14 @@ async def proxy_websocket(
         websocket_url(origin, request),
         headers=websocket_request_headers(request, origin),
         protocols=protocols,
-        max_msg_size=1024**3,
+        heartbeat=heartbeat,
+        max_msg_size=max_msg_size,
     ) as upstream:
         selected_protocol = (upstream.protocol,) if upstream.protocol else ()
         downstream = web.WebSocketResponse(
             protocols=selected_protocol,
-            max_msg_size=1024**3,
+            heartbeat=heartbeat,
+            max_msg_size=max_msg_size,
         )
         await downstream.prepare(request)
         to_upstream = asyncio.create_task(
@@ -244,16 +251,22 @@ async def proxy_websocket(
             name="st-proxy-websocket-upstream-to-client",
         )
         tasks = {to_upstream, to_client}
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-        for task in done:
-            try:
-                task.result()
-            except (ClientError, ConnectionError, RuntimeError) as exc:
-                LOG.debug("WebSocket relay ended after transport error: %s", type(exc).__name__)
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        with contextlib.suppress(ConnectionError, RuntimeError):
-            await downstream.close(code=upstream.close_code or 1000)
+        try:
+            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    task.result()
+                except (ClientError, ConnectionError, RuntimeError) as exc:
+                    LOG.debug(
+                        "WebSocket relay ended after transport error: %s",
+                        type(exc).__name__,
+                    )
+        finally:
+            pending = {task for task in tasks if not task.done()}
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            with contextlib.suppress(ConnectionError, RuntimeError):
+                await downstream.close(code=upstream.close_code or 1000)
         return downstream

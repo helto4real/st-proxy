@@ -78,6 +78,22 @@ required for nested userdata names: ComfyUI sends a path such as
 `workflows/example.json` as the single route segment
 `workflows%2Fexample.json`.
 
+## Transport and memory isolation
+
+Lifecycle/control calls, LLM chat streams, ComfyUI HTTP traffic, and ComfyUI
+WebSockets use separate client sessions and connection pools. A full or stale
+WebSocket pool therefore cannot prevent `/free`, model lifecycle verification,
+or ordinary ComfyUI HTTP calls. Connection acquisition has an explicit timeout,
+streaming responses have a read-idle timeout, and WebSockets use bidirectional
+heartbeats with deterministic relay-task cleanup.
+
+Workflow request bodies are read with a dedicated byte limit. The FIFO also
+limits both queued workflow count and total queued workflow bytes. If the
+downstream client disconnects before submission, the queued item and its body
+are removed. Once submission has started, the coordinator continues monitoring
+the prompt so GPU ownership never becomes ambiguous, but the no-longer-needed
+request body is released immediately after the upstream response.
+
 ## Workflow lease sequence
 
 1. A workflow submission joins the same FIFO as chat work.
@@ -87,8 +103,9 @@ required for nested userdata names: ComfyUI sends a path such as
    release postcondition.
 4. The coordinator forwards the workflow and records the returned `prompt_id`.
 5. ComfyUI history is polled until that exact prompt succeeds, fails, is
-   cancelled, or times out. The browser WebSocket is only a presentation path;
-   it is not the authoritative completion signal.
+   cancelled, times out, or exceeds the consecutive transport-failure limit.
+   The browser WebSocket is only a presentation path; it is not the
+   authoritative completion signal.
 6. Successful completion enters `comfy_ready`, the warm idle state. Consecutive
    workflows reuse the same ownership period.
 7. A chat at the FIFO head or the idle deadline starts the reverse handoff.
@@ -102,6 +119,11 @@ the destination backend before the source release succeeds. In particular, a
 failed or timed-out ComfyUI cleanup no longer attempts to reload the LLM: the
 broker enters `error`, rejects queued GPU work, and reports the sanitized cause
 through `/broker/status`.
+
+Status includes coordinator health, dispatcher liveness, state age, stall
+classification, active transport counts, and queued workflow bytes. The local
+stack supervisor uses `healthy`, rather than the intentionally permissive
+`chat_available`, for its watchdog decision.
 
 This is logical VRAM ownership through application lifecycle APIs. It cannot
 revoke CUDA device access from a misbehaving process. Hard device exclusion

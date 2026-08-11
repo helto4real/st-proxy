@@ -305,11 +305,15 @@ Immediately after startup, expect:
 ```json
 {
   "state": "llm_ready",
+  "state_stalled": false,
+  "healthy": true,
+  "dispatcher_alive": true,
   "gpu_owner": "llm",
   "active_chats": 0,
   "active_comfy_controls": 0,
   "waiting_chats": 0,
   "waiting_images": 0,
+  "queued_workflow_bytes": 0,
   "active_prompt_id": null,
   "last_error": null,
   "chat_available": true,
@@ -352,11 +356,18 @@ The chat starts after the original LLM model is verified.
 | Field | Meaning |
 | --- | --- |
 | `state` | Current handoff or processing stage |
+| `state_age_seconds` | Seconds spent in the current coordinator state |
+| `state_stalled` | Whether the state exceeded its operation-specific deadline |
+| `healthy` | Coordinator, dispatcher, ownership, and state-age watchdog result |
+| `dispatcher_alive` | Whether the FIFO dispatcher task is running |
 | `gpu_owner` | `llm`, `comfy`, or `null` while ownership is being changed or is unknown |
 | `active_chats` | Chat requests currently using the selected LLM |
 | `active_comfy_controls` | Cancellation/control requests currently using the ComfyUI control plane |
 | `waiting_chats` | Chat requests still waiting in the FIFO queue |
 | `waiting_images` | Image requests still waiting in the FIFO queue |
+| `queued_workflow_bytes` | Request-body bytes retained by queued workflows |
+| `max_queued_images` | Configured queued-workflow count limit |
+| `max_queued_workflow_bytes` | Configured queued-workflow memory limit |
 | `active_prompt_id` | ComfyUI prompt currently being monitored, or `null` |
 | `last_error` | Most recent controlled error or warning |
 | `chat_available` | Whether the broker can accept chat requests; `true` does not mean the LLM is already loaded |
@@ -364,6 +375,13 @@ The chat starts after the original LLM model is verified.
 | `idle_timeout` | Configured ComfyUI idle period in seconds |
 | `idle_restore_scheduled` | Whether the broker is currently counting down to an idle LLM restore |
 | `comfy_route_policy` | `transparent` by default, or `strict` when unclassified mutations are rejected |
+| `active_chat_requests` | Downstream chat HTTP requests currently open |
+| `active_image_requests` | Downstream non-WebSocket ComfyUI requests currently open |
+| `active_websockets` | ComfyUI WebSockets currently relayed |
+| `control_connection_limit` | Connection cap for lifecycle and coordinated control calls |
+| `chat_connection_limit` | Connection cap for LLM chat traffic |
+| `image_connection_limit` | Connection cap for ordinary ComfyUI HTTP traffic |
+| `websocket_connection_limit` | Connection cap for ComfyUI WebSockets |
 
 `waiting_chats` and `waiting_images` count queued work. The request currently
 being activated or processed is not included in those counters.
@@ -413,7 +431,8 @@ environment.
 | `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific | Real LLM origin |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` | Real ComfyUI origin |
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset | KoboldCpp Admin bearer password |
-| `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `600` seconds | General upstream request timeout |
+| `--connect-timeout` | `ST_PROXY_CONNECT_TIMEOUT` | `30` seconds | Maximum pool-acquisition and socket-connect wait |
+| `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `600` seconds | Maximum idle wait between upstream response bytes |
 | `--image-timeout` | `ST_PROXY_IMAGE_TIMEOUT` | `1800` seconds | Maximum monitored image-job duration |
 | `--chat-drain-timeout` | `ST_PROXY_CHAT_DRAIN_TIMEOUT` | `1800` seconds | Maximum wait for active chats to finish |
 | `--unload-timeout` | `ST_PROXY_UNLOAD_TIMEOUT` | `180` seconds | Maximum LLM release/verification time |
@@ -421,6 +440,10 @@ environment.
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds | Maximum ComfyUI cleanup time |
 | `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds | ComfyUI idle period before proactively restoring the LLM |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds | Backend state polling interval |
+| `--comfy-poll-failure-limit` | `ST_PROXY_COMFY_POLL_FAILURE_LIMIT` | `6` | Consecutive failed history polls before abort |
+| `--max-workflow-body-bytes` | `ST_PROXY_MAX_WORKFLOW_BODY_BYTES` | `67108864` | Maximum `/prompt` request-body size |
+| `--max-queued-images` | `ST_PROXY_MAX_QUEUED_IMAGES` | `32` | Maximum workflows waiting in the FIFO |
+| `--max-queued-workflow-bytes` | `ST_PROXY_MAX_QUEUED_WORKFLOW_BYTES` | `268435456` | Maximum request-body bytes retained by waiting workflows |
 | `--strict-comfy-routes` | `ST_PROXY_STRICT_COMFY_ROUTES` | disabled | Reject unclassified mutating custom-node routes |
 | `--check-backend` | — | disabled | Check LLM control and readiness, then exit |
 | `--backend-check-timeout` | `ST_PROXY_BACKEND_CHECK_TIMEOUT` | `2` seconds | Readiness-command timeout |
@@ -468,7 +491,14 @@ newer request never jumps ahead merely because its backend is already loaded.
 
 If `active_chats` remains nonzero, a long-running or disconnected stream may
 still be draining upstream. The proxy deliberately waits for upstream
-generation to finish before asking the LLM adapter to release the GPU.
+generation to finish before asking the LLM adapter to release the GPU. A stream
+that stops producing bytes is terminated after `--request-timeout` instead of
+holding its lease indefinitely.
+
+If `healthy` is false, inspect `state_stalled`, `state_age_seconds`,
+`dispatcher_alive`, active request counts, and `last_error`. The optional stack
+supervisor treats this as an unhealthy proxy and stops the supervised stack
+instead of leaving a silent hang running.
 
 ### Startup reports Model Administration errors
 
@@ -541,14 +571,16 @@ longer.
 
 ### ComfyUI cleanup fails
 
-The proxy records the cleanup failure and still attempts to restore the LLM.
-Check ComfyUI's `/free` support and console output. If the LLM cannot reload,
-the broker enters `error` and returns HTTP 503 for queued chat.
+The proxy records the cleanup failure and does not reload the LLM because GPU
+release is unconfirmed. Check ComfyUI's `/free` support and console output. The
+broker enters `error` and returns HTTP 503 for queued GPU work until restarted.
 
 ### HTTP 502 versus HTTP 503
 
 | Response | Meaning |
 | --- | --- |
+| HTTP 413 | A workflow request body exceeded its configured byte limit |
+| HTTP 429 | The bounded workflow queue reached its count or memory limit |
 | HTTP 502 | A normal proxied request to the selected backend failed |
 | HTTP 503 | The broker rejected work because shutdown, initialization, or GPU ownership was not safely resolved |
 

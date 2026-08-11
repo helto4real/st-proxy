@@ -147,6 +147,27 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         status = await self.status()
         self.assertEqual(status["state"], "llm_ready")
         self.assertTrue(status["chat_available"])
+        self.assertTrue(status["healthy"])
+        self.assertTrue(status["dispatcher_alive"])
+        self.assertEqual(status["active_chat_requests"], 0)
+        self.assertEqual(status["active_image_requests"], 0)
+        self.assertEqual(status["active_websockets"], 0)
+
+    async def test_transport_classes_use_independent_connection_pools(self) -> None:
+        sessions = {
+            self.service.control_session,
+            self.service.chat_session,
+            self.service.image_session,
+            self.service.websocket_session,
+        }
+
+        self.assertNotIn(None, sessions)
+        self.assertEqual(len(sessions), 4)
+        status = await self.status()
+        self.assertEqual(status["control_connection_limit"], 16)
+        self.assertEqual(status["chat_connection_limit"], 64)
+        self.assertEqual(status["image_connection_limit"], 64)
+        self.assertEqual(status["websocket_connection_limit"], 32)
 
     async def test_console_logs_requests_and_handoffs_without_sensitive_data(self) -> None:
         with self.assertLogs("st_proxy", level="INFO") as captured:
@@ -193,6 +214,7 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.comfy.websocket_client_ids, ["synthetic-browser"])
         self.assertEqual(self.comfy.websocket_origins, [self.comfy_server.url])
         self.assertEqual((await self.status())["gpu_owner"], "llm")
+        self.assertEqual((await self.status())["active_websockets"], 1)
 
         image = await self.post_prompt()
         image.close()
@@ -206,6 +228,38 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         await websocket.send_bytes(b"still-connected")
         self.assertEqual((await websocket.receive()).data, b"upstream:still-connected")
         await websocket.close()
+        await wait_until(
+            lambda: self.service._active_websockets == 0  # noqa: SLF001
+        )
+
+    async def test_workflow_body_larger_than_limit_is_rejected_without_queueing(self) -> None:
+        await self.service.stop()
+        self.config = BrokerConfig.for_test(
+            kobold_url=self.kobold_server.url,
+            comfy_url=self.comfy_server.url,
+            registry=self.registry,
+            max_workflow_body_bytes=8,
+            max_queued_workflow_bytes=8,
+        )
+        self.service = BrokerService(self.config)
+        await self.service.start()
+
+        async with self.client.post(
+            f"{self.image_url}/prompt",
+            data=b"123456789",
+        ) as response:
+            self.assertEqual(response.status, 413)
+
+        async def chunked_body():
+            yield b"1234"
+            yield b"56789"
+
+        async with self.client.post(
+            f"{self.image_url}/prompt",
+            data=chunked_body(),
+        ) as response:
+            self.assertEqual(response.status, 413)
+        self.assertEqual(self.comfy.prompt_calls, [])
 
     async def test_comfy_gateway_rewrites_private_origins_and_redirects(self) -> None:
         async with self.client.get(
@@ -491,6 +545,39 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         await chat_response.read()
         chat_response.close()
 
+    async def test_stalled_chat_stream_releases_lease_after_read_timeout(self) -> None:
+        await self.service.stop()
+        self.kobold.hold_chat = True
+        self.config = BrokerConfig.for_test(
+            kobold_url=self.kobold_server.url,
+            comfy_url=self.comfy_server.url,
+            registry=self.registry,
+            connect_timeout=0.05,
+            request_timeout=0.5,
+        )
+        self.service = BrokerService(self.config)
+        await self.service.start()
+
+        chat_response = await self.client.post(f"{self.chat_url}/api/extra/generate/stream")
+        self.assertEqual(
+            await chat_response.content.readuntil(b"\n\n"),
+            b"data: synthetic-one\n\n",
+        )
+        await wait_until(
+            lambda: (
+                self.service.coordinator is not None
+                and self.service.coordinator.status()["active_chats"] == 0
+            )
+        )
+        chat_response.close()
+        self.kobold.chat_release.set()
+        await asyncio.sleep(0.05)
+
+        image = await self.post_prompt()
+        self.assertEqual(image.status, 200)
+        image.close()
+        await self.wait_comfy_ready()
+
     async def test_concurrent_image_requests_are_fifo_batched_before_chat(self) -> None:
         self.comfy.auto_complete = False
         first = await self.post_prompt()
@@ -528,6 +615,46 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
             ["unload_model", "initial_model"],
         )
         self.assertEqual(self.comfy.free_calls, 2)
+
+    async def test_http_workflow_queue_is_bounded_and_cleans_up_cancelled_request(self) -> None:
+        await self.service.stop()
+        self.comfy.auto_complete = False
+        self.config = BrokerConfig.for_test(
+            kobold_url=self.kobold_server.url,
+            comfy_url=self.comfy_server.url,
+            registry=self.registry,
+            max_queued_images=1,
+        )
+        self.service = BrokerService(self.config)
+        await self.service.start()
+
+        first = await self.post_prompt()
+        first.close()
+        queued = asyncio.create_task(self.post_prompt())
+        await wait_until(
+            lambda: (
+                self.service.coordinator is not None
+                and self.service.coordinator.status()["waiting_images"] == 1
+            )
+        )
+
+        rejected = await self.post_prompt()
+        self.assertEqual(rejected.status, 429)
+        self.assertEqual(rejected.headers["Retry-After"], "1")
+        rejected.close()
+
+        queued.cancel()
+        await asyncio.gather(queued, return_exceptions=True)
+        await wait_until(
+            lambda: (
+                self.service.coordinator is not None
+                and self.service.coordinator.status()["waiting_images"] == 0
+                and self.service.coordinator.status()["queued_workflow_bytes"] == 0
+            )
+        )
+        self.comfy.completion["synthetic-1"].set()
+        await self.wait_comfy_ready()
+        self.assertEqual(self.comfy.prompt_calls, ["synthetic-1"])
 
     async def test_fifo_does_not_batch_images_across_a_queued_chat(self) -> None:
         self.comfy.auto_complete = False
@@ -598,6 +725,29 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.comfy.interrupt_calls, 1)
         self.assertEqual(self.kobold.model, "synthetic-model.gguf")
         self.assertIn("timed out", (await self.status())["last_error"])
+
+    async def test_repeated_history_failures_abort_without_waiting_for_image_timeout(self) -> None:
+        await self.service.stop()
+        self.comfy.auto_complete = False
+        self.comfy.history_failures = 10
+        self.config = BrokerConfig.for_test(
+            kobold_url=self.kobold_server.url,
+            comfy_url=self.comfy_server.url,
+            registry=self.registry,
+            image_timeout=5,
+            comfy_poll_failure_limit=2,
+        )
+        self.service = BrokerService(self.config)
+        await self.service.start()
+
+        response = await self.post_prompt()
+        self.assertEqual(response.status, 200)
+        response.close()
+        await self.wait_ready()
+
+        status = await self.status()
+        self.assertIn("history monitoring", status["last_error"])
+        self.assertEqual(self.comfy.interrupt_calls, 1)
 
     async def test_unload_failure_restores_and_releases_lock(self) -> None:
         self.kobold.unload_failures = 1

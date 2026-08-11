@@ -162,9 +162,9 @@ case "$url" in
         service_alive proxy || exit 1
         unhealthy_file=${FAKE_BROKER_UNHEALTHY_FILE:-}
         if [ -n "$unhealthy_file" ] && [ -e "$unhealthy_file" ]; then
-            printf '{"chat_available":false}'
+            printf '{"healthy":false}'
         else
-            printf '{"chat_available":true}'
+            printf '{"healthy":true}'
         fi
         ;;
     */health)
@@ -634,7 +634,7 @@ def test_monitor_stops_when_broker_reports_backend_unavailable(
     output = supervisor.communicate(timeout=12)[0]
 
     assert supervisor.returncode == 1
-    assert "proxy reports the LLM backend unavailable" in output
+    assert "proxy reports an unhealthy or stalled coordinator" in output
 
 
 def test_proxy_waits_for_alltalk_ready_response(fake_stack: FakeStack) -> None:

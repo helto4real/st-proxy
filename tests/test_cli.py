@@ -16,7 +16,12 @@ def test_default_cli_uses_koboldcpp_compatibility_defaults() -> None:
 
     assert config.llm_backend == "koboldcpp"
     assert config.llm_url == "http://127.0.0.1:5002"
+    assert config.connect_timeout == 30
     assert config.idle_timeout == 60
+    assert config.comfy_poll_failure_limit == 6
+    assert config.max_workflow_body_bytes == 64 * 1024**2
+    assert config.max_queued_images == 32
+    assert config.max_queued_workflow_bytes == 256 * 1024**2
     assert config.allow_unknown_comfy_routes
 
 
@@ -50,6 +55,27 @@ def test_idle_timeout_cli_option_maps_to_config() -> None:
     config = _parse("--idle-timeout", "12.5")
 
     assert config.idle_timeout == 12.5
+
+
+def test_stability_limit_options_map_to_config() -> None:
+    config = _parse(
+        "--connect-timeout",
+        "4.5",
+        "--comfy-poll-failure-limit",
+        "4",
+        "--max-workflow-body-bytes",
+        "100",
+        "--max-queued-images",
+        "5",
+        "--max-queued-workflow-bytes",
+        "500",
+    )
+
+    assert config.connect_timeout == 4.5
+    assert config.comfy_poll_failure_limit == 4
+    assert config.max_workflow_body_bytes == 100
+    assert config.max_queued_images == 5
+    assert config.max_queued_workflow_bytes == 500
 
 
 def test_strict_comfy_route_policy_is_explicit() -> None:
