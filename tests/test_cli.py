@@ -18,6 +18,7 @@ def test_default_cli_uses_koboldcpp_compatibility_defaults() -> None:
     assert config.llm_url == "http://127.0.0.1:5002"
     assert config.connect_timeout == 30
     assert config.idle_timeout == 60
+    assert not config.restore_llm_on_idle
     assert config.comfy_poll_failure_limit == 6
     assert config.max_workflow_body_bytes == 64 * 1024**2
     assert config.max_queued_images == 32
@@ -55,6 +56,23 @@ def test_idle_timeout_cli_option_maps_to_config() -> None:
     config = _parse("--idle-timeout", "12.5")
 
     assert config.idle_timeout == 12.5
+
+
+def test_restore_llm_on_idle_is_explicitly_enabled() -> None:
+    config = _parse("--restore-llm-on-idle")
+
+    assert config.restore_llm_on_idle
+
+
+def test_restore_llm_on_idle_environment_setting_is_supported() -> None:
+    with patch.dict(
+        os.environ,
+        {"ST_PROXY_RESTORE_LLM_ON_IDLE": "true"},
+        clear=True,
+    ):
+        config = config_from_args(build_parser().parse_args(()))
+
+    assert config.restore_llm_on_idle
 
 
 def test_stability_limit_options_map_to_config() -> None:

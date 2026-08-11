@@ -31,10 +31,11 @@ reloading the LLM between them.
 
 When an LLM request reaches the head of the queue, the broker calls ComfyUI
 `/free`, restores the LLM state captured at startup, verifies readiness, and
-releases the chat request. If ComfyUI owns the GPU and the queue remains empty
-for 60 seconds, the broker performs that same verified restore proactively so
-the LLM is ready for the next chat. New work resets the idle timer. No request
-can overtake a request for the other backend.
+releases the chat request. By default, ComfyUI keeps the GPU until a chat needs
+the LLM. With `--restore-llm-on-idle`, an empty queue starts the configured
+idle timer and the broker performs that same verified restore proactively when
+the timer expires. New work resets the timer. No request can overtake a request
+for the other backend.
 
 When the broker starts, it validates the selected LLM lifecycle API, calls
 ComfyUI `/free`, and captures one ready LLM model before accepting chat
@@ -223,6 +224,7 @@ Example idle response:
   "chat_available": true,
   "llm_backend": "koboldcpp",
   "idle_timeout": 60.0,
+  "idle_restore_enabled": false,
   "idle_restore_scheduled": false,
   "comfy_route_policy": "transparent"
 }
@@ -249,6 +251,7 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--reload-timeout` | `ST_PROXY_RELOAD_TIMEOUT` | `600` seconds |
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds |
 | `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds |
+| `--restore-llm-on-idle` | `ST_PROXY_RESTORE_LLM_ON_IDLE` | disabled |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds |
 | `--comfy-poll-failure-limit` | `ST_PROXY_COMFY_POLL_FAILURE_LIMIT` | `6` |
 | `--max-workflow-body-bytes` | `ST_PROXY_MAX_WORKFLOW_BODY_BYTES` | `67108864` |

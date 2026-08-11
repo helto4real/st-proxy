@@ -278,6 +278,7 @@ def test_start_order_working_directories_and_logging(
     assert "--chat-port 5002" in proxy_command
     assert "--image-port 8189" in proxy_command
     assert "--idle-timeout 60" in proxy_command
+    assert "--restore-llm-on-idle" not in proxy_command
 
     assert "http://127.0.0.1:5001" in readiness_requests
     assert "http://127.0.0.1:8008/health" in readiness_requests
@@ -328,8 +329,14 @@ def test_koboldcpp_config_setting_accepts_relative_name_without_extension(
     assert "Select configuration" not in output
 
 
-def test_koboldcpp_prompts_with_sorted_names_without_extensions(
+@pytest.mark.parametrize(
+    ("idle_restore_answer", "restore_enabled"),
+    [("maybe\n\n", False), ("y\n", True)],
+)
+def test_koboldcpp_prompts_with_sorted_names_and_idle_restore_choice(
     fake_stack: FakeStack,
+    idle_restore_answer: str,
+    restore_enabled: bool,
 ) -> None:
     first = fake_stack.llm_dir / "models" / "general" / "alpha.kcpps"
     selected = (
@@ -345,13 +352,19 @@ def test_koboldcpp_prompts_with_sorted_names_without_extensions(
     fake_stack.env.pop("ST_STACK_LLM_COMMAND")
     fake_stack.env.pop("ST_STACK_KOBOLD_CONFIG", None)
 
-    supervisor = fake_stack.start(stdin_data="0\nnot-a-number\n2\n")
+    supervisor = fake_stack.start(
+        stdin_data="0\nnot-a-number\n2\n" + idle_restore_answer
+    )
     events = fake_stack.wait_for_services(
         supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
     )
     llm_pid = next(pid for service, _cwd, pid in events if service == "llm")
     llm_command = (
         Path(f"/proc/{llm_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    )
+    proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
+    proxy_command = (
+        Path(f"/proc/{proxy_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
     )
     supervisor.send_signal(signal.SIGINT)
     output = supervisor.communicate(timeout=12)[0]
@@ -362,6 +375,15 @@ def test_koboldcpp_prompts_with_sorted_names_without_extensions(
     assert "  2) roleplay/gemma4/primary config" in output
     assert "Select configuration [1-2]:" in output
     assert output.count("enter a number between 1 and 2") == 2
+    assert "Restore KoboldCpp after 60 seconds of ComfyUI inactivity? [y/N]:" in output
+    assert ("--restore-llm-on-idle" in proxy_command) is restore_enabled
+    if restore_enabled:
+        assert "automatic LLM idle restore enabled" in output
+    else:
+        assert output.count(
+            "enter y or press Enter to leave automatic restore disabled"
+        ) == 1
+        assert "automatic LLM idle restore disabled" in output
     assert "primary config.kcpps" not in output
 
 

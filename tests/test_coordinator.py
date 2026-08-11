@@ -117,7 +117,10 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
     async def restart_with_idle_timeout(self, idle_timeout: float) -> None:
-        await self.restart_with_config(idle_timeout=idle_timeout)
+        await self.restart_with_config(
+            idle_timeout=idle_timeout,
+            restore_llm_on_idle=True,
+        )
 
     async def restart_with_config(self, **overrides: object) -> None:
         await self.coordinator.close()
@@ -255,6 +258,24 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ComfyUI idle restore timer started", logs)
         self.assertIn("ComfyUI idle timeout reached", logs)
         self.assertIn("ComfyUI idle restore completed", logs)
+
+    async def test_idle_restore_is_disabled_by_default(self) -> None:
+        await self.restart_with_config(idle_timeout=0.01)
+
+        response = await self.submit_image()
+        self.assertEqual(response.status, 200)
+        self.comfy.completion.set()
+        await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+        await asyncio.sleep(0.04)
+
+        status = self.coordinator.status()
+        self.assertFalse(status["idle_restore_enabled"])
+        self.assertFalse(status["idle_restore_scheduled"])
+        self.assertEqual(self.llm.calls, ["validate", "snapshot", "release"])
+
+        async with self.coordinator.chat_lease():
+            pass
+        self.assertIn("acquire", self.llm.calls)
 
     async def test_new_work_cancels_idle_timeout(self) -> None:
         await self.restart_with_idle_timeout(0.08)

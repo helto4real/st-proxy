@@ -111,6 +111,7 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
             comfy_url=self.comfy_server.url,
             registry=self.registry,
             idle_timeout=0.05,
+            restore_llm_on_idle=True,
         )
         self.service = BrokerService(self.config)
         await self.service.start()
@@ -126,6 +127,7 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         )
         status = await self.status()
         self.assertEqual(status["idle_timeout"], 0.05)
+        self.assertTrue(status["idle_restore_enabled"])
         self.assertTrue(status["idle_restore_scheduled"])
 
         await self.wait_ready()
@@ -149,6 +151,7 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status["chat_available"])
         self.assertTrue(status["healthy"])
         self.assertTrue(status["dispatcher_alive"])
+        self.assertFalse(status["idle_restore_enabled"])
         self.assertEqual(status["active_chat_requests"], 0)
         self.assertEqual(status["active_image_requests"], 0)
         self.assertEqual(status["active_websockets"], 0)

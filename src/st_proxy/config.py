@@ -77,6 +77,7 @@ class BrokerConfig:
     reload_timeout: float = 600.0
     cleanup_timeout: float = 60.0
     idle_timeout: float = 60.0
+    restore_llm_on_idle: bool = False
     poll_interval: float = 0.5
     comfy_poll_failure_limit: int = 6
     max_workflow_body_bytes: int = 64 * 1024**2

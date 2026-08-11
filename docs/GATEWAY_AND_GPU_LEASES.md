@@ -108,9 +108,11 @@ request body is released immediately after the upstream response.
    authoritative completion signal.
 6. Successful completion enters `comfy_ready`, the warm idle state. Consecutive
    workflows reuse the same ownership period.
-7. A chat at the FIFO head or the idle deadline starts the reverse handoff.
-   Active ComfyUI control requests drain first, `/free` must succeed, the LLM
-   restore point is acquired, and readiness is verified before chat starts.
+7. A chat at the FIFO head starts the reverse handoff. When
+   `restore_llm_on_idle` is enabled, the idle deadline can start the same
+   handoff proactively. Active ComfyUI control requests drain first, `/free`
+   must succeed, the LLM restore point is acquired, and readiness is verified
+   before chat starts.
 
 ## Failure boundary
 

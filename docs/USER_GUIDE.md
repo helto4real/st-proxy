@@ -54,11 +54,11 @@ When a chat reaches the front of the queue, it:
 4. Verifies that the original model is ready.
 5. Starts the queued chat.
 
-If no request is waiting after an image, ComfyUI remains loaded for up to 60
-seconds so consecutive image requests can reuse it. New work resets that idle
-timer. Once the full idle period passes with no active or queued jobs, the proxy
-frees ComfyUI and restores the startup LLM state so the next chat can begin
-without waiting for a handoff.
+If no request is waiting after an image, ComfyUI remains loaded until a chat
+needs the LLM. Enable `--restore-llm-on-idle` to start the configured idle timer
+instead. New work resets that timer. Once the full idle period passes with no
+active or queued jobs, the proxy frees ComfyUI and restores the startup LLM
+state so the next chat can begin without waiting for a handoff.
 
 ![FIFO queue showing two consecutive images using one ComfyUI ownership period before switching once to KoboldCpp](images/lazy-fifo-flow.png)
 
@@ -69,7 +69,7 @@ without waiting for a handoff.
 | Image 1 → Image 2 → Chat 1 | One switch to ComfyUI, both images run, then one switch back to the LLM |
 | Image 1 → Chat 1 → Image 2 | Chat 1 runs between the images; Image 2 cannot overtake it |
 | Chat 1 → Chat 2 → Image 1 | Both chats may run concurrently; the image waits until both finish |
-| Image 1 → no new request | ComfyUI stays ready for 60 seconds, then the proxy restores the LLM |
+| Image 1 → no new request | ComfyUI stays ready; with idle restore enabled, the proxy restores the LLM after the configured timeout |
 
 ## Requirements
 
@@ -265,6 +265,10 @@ Leave this terminal running. Press `Ctrl+C` to stop the proxy cleanly. If
 ComfyUI owns the GPU at shutdown, the proxy attempts to free ComfyUI and restore
 the selected LLM before exiting.
 
+Add `--restore-llm-on-idle` when you want the proxy to restore the selected LLM
+proactively after `--idle-timeout` seconds. Without the flag, the next chat
+request triggers the restore instead.
+
 ## Configure SillyTavern
 
 ### Chat connection
@@ -318,6 +322,7 @@ Immediately after startup, expect:
   "last_error": null,
   "chat_available": true,
   "llm_backend": "koboldcpp",
+  "idle_restore_enabled": false,
   "comfy_route_policy": "transparent"
 }
 ```
@@ -373,6 +378,7 @@ The chat starts after the original LLM model is verified.
 | `chat_available` | Whether the broker can accept chat requests; `true` does not mean the LLM is already loaded |
 | `llm_backend` | Selected lifecycle adapter, such as `koboldcpp` or `ollama` |
 | `idle_timeout` | Configured ComfyUI idle period in seconds |
+| `idle_restore_enabled` | Whether proactive LLM restoration after the idle timeout is enabled |
 | `idle_restore_scheduled` | Whether the broker is currently counting down to an idle LLM restore |
 | `comfy_route_policy` | `transparent` by default, or `strict` when unclassified mutations are rejected |
 | `active_chat_requests` | Downstream chat HTTP requests currently open |
@@ -438,7 +444,8 @@ environment.
 | `--unload-timeout` | `ST_PROXY_UNLOAD_TIMEOUT` | `180` seconds | Maximum LLM release/verification time |
 | `--reload-timeout` | `ST_PROXY_RELOAD_TIMEOUT` | `600` seconds | Maximum LLM restore/verification time |
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds | Maximum ComfyUI cleanup time |
-| `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds | ComfyUI idle period before proactively restoring the LLM |
+| `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds | ComfyUI idle period used when proactive restore is enabled |
+| `--restore-llm-on-idle` | `ST_PROXY_RESTORE_LLM_ON_IDLE` | disabled | Proactively restore the LLM when the ComfyUI idle period expires |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds | Backend state polling interval |
 | `--comfy-poll-failure-limit` | `ST_PROXY_COMFY_POLL_FAILURE_LIMIT` | `6` | Consecutive failed history polls before abort |
 | `--max-workflow-body-bytes` | `ST_PROXY_MAX_WORKFLOW_BODY_BYTES` | `67108864` | Maximum `/prompt` request-body size |
@@ -672,8 +679,11 @@ After adapting it to your environment:
 ```
 
 The interactive KoboldCpp list displays paths relative to `models` and omits
-the `.kcpps` extension. To select a config without a prompt, set its relative
-path with or without the extension:
+the `.kcpps` extension. After the model choice, pressing Enter at the idle
+restore question leaves proactive restore disabled; answer `y` to pass
+`--restore-llm-on-idle` to the proxy. To select a config without prompts, set
+its relative path with or without the extension and configure idle restore with
+`ST_PROXY_RESTORE_LLM_ON_IDLE` when needed:
 
 ```bash
 export ST_STACK_KOBOLD_CONFIG='roleplay/gemma4/role-play-no-thinking-goetia-26b'
@@ -725,7 +735,7 @@ Healthy idle states:
 
 ```text
 llm_ready   — the selected LLM owns the GPU
-comfy_ready — ComfyUI owns the GPU during the configured idle grace period
+comfy_ready — ComfyUI owns the GPU until chat or the optional idle restore
 ```
 
 Safe stop:

@@ -52,6 +52,7 @@ typeset -g KOBOLD_CONFIG_DIR="${ST_STACK_KOBOLD_CONFIG_DIR:-${LLM_DIR}/models}"
 typeset -g KOBOLD_CONFIG_SETTING="${ST_STACK_KOBOLD_CONFIG:-}"
 typeset -g KOBOLD_SELECTED_CONFIG=""
 typeset -ga KOBOLD_CONFIG_FILES=()
+typeset -ga PROXY_IDLE_RESTORE_ARGS=()
 
 typeset -gr RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 typeset -gr RUNTIME_DIR="${RUNTIME_BASE}/st-stack-${UID}"
@@ -216,6 +217,36 @@ prompt_for_kobold_config() {
     done
 }
 
+prompt_for_idle_restore() {
+    local answer
+
+    while true; do
+        print -nru2 -- \
+            "Restore ${LLM_LABEL} after ${PROXY_IDLE_TIMEOUT} seconds of ComfyUI inactivity? [y/N]: "
+        if ! IFS= read -r answer; then
+            typeset -gx ST_PROXY_RESTORE_LLM_ON_IDLE=false
+            log "automatic LLM idle restore disabled"
+            return 0
+        fi
+        case "${(L)answer}" in
+            ""|n|no)
+                typeset -gx ST_PROXY_RESTORE_LLM_ON_IDLE=false
+                PROXY_IDLE_RESTORE_ARGS=()
+                log "automatic LLM idle restore disabled"
+                return 0
+                ;;
+            y|yes)
+                PROXY_IDLE_RESTORE_ARGS=(--restore-llm-on-idle)
+                log "automatic LLM idle restore enabled"
+                return 0
+                ;;
+            *)
+                log "enter y or press Enter to leave automatic restore disabled"
+                ;;
+        esac
+    done
+}
+
 configure_kobold_command() {
     local executable_path
 
@@ -247,6 +278,9 @@ configure_kobold_command() {
     LLM_COMMAND_NAME=${KOBOLD_EXECUTABLE:t:l}
     kobold_config_display_name "${KOBOLD_SELECTED_CONFIG}"
     log "selected KoboldCpp config: ${REPLY}"
+    if [[ -z "${KOBOLD_CONFIG_SETTING}" ]]; then
+        prompt_for_idle_restore || return 1
+    fi
 }
 
 prepare_runtime_dir() {
@@ -571,7 +605,8 @@ ensure_service_started() {
                 --comfy-url "${COMFY_URL}" \
                 --chat-port "${PROXY_CHAT_PORT}" \
                 --image-port "${PROXY_IMAGE_PORT}" \
-                --idle-timeout "${PROXY_IDLE_TIMEOUT}"
+                --idle-timeout "${PROXY_IDLE_TIMEOUT}" \
+                "${PROXY_IDLE_RESTORE_ARGS[@]}"
             ;;
         *)
             log "internal error: unknown service ${service}"

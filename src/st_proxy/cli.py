@@ -92,6 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=_env_float("IDLE_TIMEOUT", 60),
         help="restore the selected LLM after ComfyUI has been idle for this many seconds",
     )
+    parser.add_argument(
+        "--restore-llm-on-idle",
+        action="store_true",
+        default=_env_bool("RESTORE_LLM_ON_IDLE", False),
+        help="proactively restore the selected LLM after the ComfyUI idle timeout",
+    )
     parser.add_argument("--poll-interval", type=float, default=_env_float("POLL_INTERVAL", 0.5))
     parser.add_argument(
         "--comfy-poll-failure-limit",
@@ -163,6 +169,7 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         reload_timeout=args.reload_timeout,
         cleanup_timeout=args.cleanup_timeout,
         idle_timeout=args.idle_timeout,
+        restore_llm_on_idle=args.restore_llm_on_idle,
         poll_interval=args.poll_interval,
         comfy_poll_failure_limit=args.comfy_poll_failure_limit,
         max_workflow_body_bytes=args.max_workflow_body_bytes,

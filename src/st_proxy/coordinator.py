@@ -152,6 +152,7 @@ class HandoffCoordinator:
             "chat_available": not self._fatal_error and not self._closing,
             "llm_backend": self._llm.info.kind,
             "idle_timeout": self._config.idle_timeout,
+            "idle_restore_enabled": self._config.restore_llm_on_idle,
             "idle_restore_scheduled": self._idle_restore_deadline is not None,
             "comfy_route_policy": (
                 "transparent" if self._config.allow_unknown_comfy_routes else "strict"
@@ -350,7 +351,8 @@ class HandoffCoordinator:
 
     def _idle_restore_is_safe(self) -> bool:
         return (
-            self._owner is GpuOwner.COMFY
+            self._config.restore_llm_on_idle
+            and self._owner is GpuOwner.COMFY
             and self._state is HandoffState.COMFY_READY
             and not self._queue
             and not self._active_chats
