@@ -49,6 +49,21 @@ class KoboldCppAdapterContractTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.kobold.model, restore_point.model)
 
+    async def test_observation_is_passive_and_default_load_returns_restore_point(
+        self,
+    ) -> None:
+        observed = await self.backend.observe_ready()
+        self.assertIsNotNone(observed)
+        self.assertEqual(self.kobold.admin_calls, [])
+
+        self.kobold.model = "inactive"
+        self.assertIsNone(await self.backend.observe_ready())
+        self.assertEqual(self.kobold.admin_calls, [])
+
+        restored = await self.backend.acquire_gpu(None)
+        self.assertEqual(restored.model, "synthetic-model.gguf")
+        self.assertEqual(self.kobold.admin_calls, ["initial_model"])
+
 
 if __name__ == "__main__":
     unittest.main()

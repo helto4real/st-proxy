@@ -33,6 +33,20 @@ def _is_routine_comfy_poll(request: web.Request) -> bool:
     )
 
 
+def _is_passive_llm_metadata(request: web.Request, backend_kind: str) -> bool:
+    return (
+        backend_kind == "koboldcpp"
+        and request.method == "GET"
+        and request.path in {"/api/v1/model", "/v1/models"}
+    )
+
+
+def _inactive_llm_metadata(path: str) -> web.Response:
+    if path == "/v1/models":
+        return web.json_response({"object": "list", "data": []})
+    return web.json_response({"result": "inactive"})
+
+
 def _bound_port(site: web.TCPSite) -> int:
     server = site._server  # aiohttp has no public bound-port accessor
     if server is None or not server.sockets:
@@ -236,12 +250,27 @@ class BrokerService:
             request.path,
         )
         try:
-            async with self.coordinator.chat_lease():
-                response = await proxy_stream(
-                    request,
-                    self.chat_session,
-                    self.llm.info.chat_origin,
+            if _is_passive_llm_metadata(request, self.llm.info.kind):
+                LOG.debug(
+                    "passive LLM metadata request bypasses GPU lease: path=%s",
+                    request.path,
                 )
+                async with self.coordinator.passive_llm_metadata() as available:
+                    if available:
+                        response = await proxy_stream(
+                            request,
+                            self.chat_session,
+                            self.llm.info.chat_origin,
+                        )
+                    else:
+                        response = _inactive_llm_metadata(request.path)
+            else:
+                async with self.coordinator.chat_lease():
+                    response = await proxy_stream(
+                        request,
+                        self.chat_session,
+                        self.llm.info.chat_origin,
+                    )
             LOG.info(
                 "request completed: target=%s method=%s path=%s status=%s duration=%.3fs",
                 label,

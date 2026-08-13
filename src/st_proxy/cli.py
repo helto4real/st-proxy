@@ -90,13 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--idle-timeout",
         type=float,
         default=_env_float("IDLE_TIMEOUT", 60),
-        help="restore the selected LLM after ComfyUI has been idle for this many seconds",
+        help="deprecated compatibility setting; no automatic restore timer is scheduled",
     )
     parser.add_argument(
         "--restore-llm-on-idle",
         action="store_true",
         default=_env_bool("RESTORE_LLM_ON_IDLE", False),
-        help="proactively restore the selected LLM after the ComfyUI idle timeout",
+        help="deprecated compatibility flag; automatic LLM restore is disabled",
     )
     parser.add_argument("--poll-interval", type=float, default=_env_float("POLL_INTERVAL", 0.5))
     parser.add_argument(

@@ -37,8 +37,9 @@ forwards the interface, uploads, previews, API responses, and live WebSocket
 updates without changing GPU ownership. Only a workflow submission requests a
 ComfyUI GPU lease.
 
-The proxy starts with the selected LLM owning the GPU. When an image reaches the front
-of the queue, it:
+KoboldCpp startup is passive: the proxy does not contact it or assume GPU
+ownership until active work arrives. When an image reaches the front of the
+queue, it:
 
 1. Stops starting newer chat requests.
 2. Waits for active chats and streams to finish.
@@ -50,15 +51,19 @@ When a chat reaches the front of the queue, it:
 
 1. Waits for the active image to finish.
 2. Asks ComfyUI to unload models and free memory.
-3. Restores the LLM state captured at startup.
+3. Restores the previously observed LLM state, or loads KoboldCpp's configured
+   `initial_model` once if the proxy has not observed a loaded model yet.
 4. Verifies that the original model is ready.
 5. Starts the queued chat.
 
-If no request is waiting after an image, ComfyUI remains loaded until a chat
-needs the LLM. Enable `--restore-llm-on-idle` to start the configured idle timer
-instead. New work resets that timer. Once the full idle period passes with no
-active or queued jobs, the proxy frees ComfyUI and restores the startup LLM
-state so the next chat can begin without waiting for a handoff.
+KoboldCpp `GET /api/v1/model` and `GET /v1/models` are passive metadata
+exceptions. They never take a chat lease or trigger lifecycle work. While
+ComfyUI owns the GPU, the proxy returns a safe inactive response without
+contacting KoboldCpp.
+
+If no request is waiting after an image, ComfyUI remains loaded until an active
+chat needs the LLM. Idle timers, workflow completion/failure, background health
+checks, startup, and shutdown never restore KoboldCpp.
 
 ![FIFO queue showing two consecutive images using one ComfyUI ownership period before switching once to KoboldCpp](images/lazy-fifo-flow.png)
 
@@ -69,7 +74,7 @@ state so the next chat can begin without waiting for a handoff.
 | Image 1 → Image 2 → Chat 1 | One switch to ComfyUI, both images run, then one switch back to the LLM |
 | Image 1 → Chat 1 → Image 2 | Chat 1 runs between the images; Image 2 cannot overtake it |
 | Chat 1 → Chat 2 → Image 1 | Both chats may run concurrently; the image waits until both finish |
-| Image 1 → no new request | ComfyUI stays ready; with idle restore enabled, the proxy restores the LLM after the configured timeout |
+| Image 1 → no new request | ComfyUI stays ready; no background event restores the LLM |
 
 ## Requirements
 
@@ -248,26 +253,21 @@ st-vram-proxy `
   --image-port 8188
 ```
 
-At startup, the proxy:
-
-1. Verifies the selected LLM lifecycle API.
-2. Calls ComfyUI `/free` to clear leftover image models.
-3. Captures and confirms the startup LLM model.
-4. Opens the two proxy listener ports.
+At KoboldCpp startup, the proxy opens the two listener ports without contacting
+KoboldCpp or changing GPU ownership. The first active chat or workflow performs
+the required lifecycle validation. `--check-backend` remains available for an
+explicit operator-requested readiness check.
 
 A healthy startup ends with a log similar to:
 
 ```text
-broker ready: chat=http://127.0.0.1:5001 image=http://127.0.0.1:8188 state=llm_ready
+broker ready: chat=http://127.0.0.1:5001 image=http://127.0.0.1:8188 state=awaiting_request
 ```
 
-Leave this terminal running. Press `Ctrl+C` to stop the proxy cleanly. If
-ComfyUI owns the GPU at shutdown, the proxy attempts to free ComfyUI and restore
-the selected LLM before exiting.
-
-Add `--restore-llm-on-idle` when you want the proxy to restore the selected LLM
-proactively after `--idle-timeout` seconds. Without the flag, the next chat
-request triggers the restore instead.
+Leave this terminal running. Press `Ctrl+C` to stop the proxy cleanly. Shutdown
+does not restore KoboldCpp. `--restore-llm-on-idle` is retained only as a
+deprecated compatibility flag and has no effect; only an active LLM request can
+start a restore.
 
 ## Configure SillyTavern
 
@@ -308,12 +308,18 @@ Immediately after startup, expect:
 
 ```json
 {
-  "state": "llm_ready",
+  "responding": true,
+  "ready": true,
+  "state": "awaiting_request",
   "state_stalled": false,
   "healthy": true,
   "dispatcher_alive": true,
-  "gpu_owner": "llm",
+  "recovering": false,
+  "recovery_attempts": 0,
+  "recovery_retry_seconds": null,
+  "gpu_owner": null,
   "active_chats": 0,
+  "active_llm_metadata": 0,
   "active_comfy_controls": 0,
   "waiting_chats": 0,
   "waiting_images": 0,
@@ -331,8 +337,8 @@ The status endpoint works on either proxy port.
 
 ### 2. Test chat
 
-Send a short SillyTavern chat message. It should complete normally while the
-status remains `llm_ready`.
+Send a short SillyTavern chat message. The first active request performs any
+required ComfyUI cleanup and KoboldCpp discovery/load, then reaches `llm_ready`.
 
 ### 3. Test image generation
 
@@ -360,13 +366,19 @@ The chat starts after the original LLM model is verified.
 
 | Field | Meaning |
 | --- | --- |
+| `responding` | The status API is serving this response |
+| `ready` | Whether coordinated GPU work can currently be accepted safely |
 | `state` | Current handoff or processing stage |
 | `state_age_seconds` | Seconds spent in the current coordinator state |
 | `state_stalled` | Whether the state exceeded its operation-specific deadline |
 | `healthy` | Coordinator, dispatcher, ownership, and state-age watchdog result |
 | `dispatcher_alive` | Whether the FIFO dispatcher task is running |
+| `recovering` | Whether a waiting active LLM request is currently restoring ownership |
+| `recovery_attempts` | Active-request restore attempts made by this coordinator |
+| `recovery_retry_seconds` | Always `null`; background recovery is disabled |
 | `gpu_owner` | `llm`, `comfy`, or `null` while ownership is being changed or is unknown |
 | `active_chats` | Chat requests currently using the selected LLM |
+| `active_llm_metadata` | Passive KoboldCpp metadata reads currently protected from workflow handoff |
 | `active_comfy_controls` | Cancellation/control requests currently using the ComfyUI control plane |
 | `waiting_chats` | Chat requests still waiting in the FIFO queue |
 | `waiting_images` | Image requests still waiting in the FIFO queue |
@@ -378,8 +390,8 @@ The chat starts after the original LLM model is verified.
 | `chat_available` | Whether the broker can accept chat requests; `true` does not mean the LLM is already loaded |
 | `llm_backend` | Selected lifecycle adapter, such as `koboldcpp` or `ollama` |
 | `idle_timeout` | Configured ComfyUI idle period in seconds |
-| `idle_restore_enabled` | Whether proactive LLM restoration after the idle timeout is enabled |
-| `idle_restore_scheduled` | Whether the broker is currently counting down to an idle LLM restore |
+| `idle_restore_enabled` | Always `false`; proactive LLM restoration is disabled |
+| `idle_restore_scheduled` | Always `false`; no idle restore is scheduled |
 | `comfy_route_policy` | `transparent` by default, or `strict` when unclassified mutations are rejected |
 | `active_chat_requests` | Downstream chat HTTP requests currently open |
 | `active_image_requests` | Downstream non-WebSocket ComfyUI requests currently open |
@@ -397,16 +409,17 @@ being activated or processed is not included in those counters.
 | State | Meaning |
 | --- | --- |
 | `initializing` | Coordinator is starting |
+| `awaiting_request` | KoboldCpp startup is passive and no GPU owner has been assumed |
 | `cleaning_comfy` | Proxy is asking ComfyUI to free models and memory |
-| `verifying_llm` | Proxy is checking the startup LLM model |
+| `verifying_llm` | Proxy is checking an LLM model before treating it as ready |
 | `llm_ready` | The selected LLM owns the GPU and chat can start |
 | `draining_llm` | Newer work is queued while active chats finish |
 | `unloading_llm` | The LLM adapter is releasing GPU resources |
 | `comfy_ready` | ComfyUI owns the GPU and is idle between image jobs |
 | `image_active` | A ComfyUI prompt is running |
-| `reloading_llm` | The startup LLM state is being restored |
+| `reloading_llm` | A waiting active LLM request is restoring the observed model state |
 | `error` | GPU ownership or backend readiness could not be verified |
-| `shutting_down` | Proxy is stopping and restoring a safe state |
+| `shutting_down` | Proxy is stopping without loading or restoring KoboldCpp |
 
 ## Everyday operation
 
@@ -444,8 +457,8 @@ environment.
 | `--unload-timeout` | `ST_PROXY_UNLOAD_TIMEOUT` | `180` seconds | Maximum LLM release/verification time |
 | `--reload-timeout` | `ST_PROXY_RELOAD_TIMEOUT` | `600` seconds | Maximum LLM restore/verification time |
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds | Maximum ComfyUI cleanup time |
-| `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds | ComfyUI idle period used when proactive restore is enabled |
-| `--restore-llm-on-idle` | `ST_PROXY_RESTORE_LLM_ON_IDLE` | disabled | Proactively restore the LLM when the ComfyUI idle period expires |
+| `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds | Deprecated compatibility setting; no restore timer is scheduled |
+| `--restore-llm-on-idle` | `ST_PROXY_RESTORE_LLM_ON_IDLE` | disabled | Deprecated compatibility flag; automatic restore remains disabled |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds | Backend state polling interval |
 | `--comfy-poll-failure-limit` | `ST_PROXY_COMFY_POLL_FAILURE_LIMIT` | `6` | Consecutive failed history polls before abort |
 | `--max-workflow-body-bytes` | `ST_PROXY_MAX_WORKFLOW_BODY_BYTES` | `67108864` | Maximum `/prompt` request-body size |
@@ -504,8 +517,9 @@ holding its lease indefinitely.
 
 If `healthy` is false, inspect `state_stalled`, `state_age_seconds`,
 `dispatcher_alive`, active request counts, and `last_error`. The optional stack
-supervisor treats this as an unhealthy proxy and stops the supervised stack
-instead of leaving a silent hang running.
+supervisor logs the degraded state but keeps the proxy and the rest of the
+stack running. Only an explicit shutdown such as `Ctrl+C`, `SIGTERM`, `SIGHUP`,
+or `./st-stack.zsh --stop` stops the supervised proxy.
 
 ### Startup reports Model Administration errors
 
@@ -541,8 +555,10 @@ models should be restored.
 ### Status remains `error`
 
 The proxy fails closed when it cannot verify GPU ownership. Read `last_error`,
-fix the backend problem, then restart the proxy. Do not bypass the proxy and
-send work directly to both backends while ownership is uncertain.
+fix the backend problem, and send a new active LLM request when you want one
+coordinated recovery attempt. The proxy performs no background load or retry.
+Do not bypass the proxy and send work directly to both backends while ownership
+is uncertain.
 
 ### KoboldCpp unload times out
 
@@ -559,8 +575,8 @@ Verify that:
 
 Symptoms include `confirmation of loaded failed: timed out`.
 
-The proxy requires the model after reload to match the model it observed at
-startup. Check that:
+After the proxy has observed a loaded model, later reloads must match it. Check
+that:
 
 - `initial_model` points to the intended startup model.
 - The model file is still available.
@@ -569,8 +585,8 @@ startup. Check that:
 
 ### ComfyUI image job times out
 
-The proxy asks ComfyUI to interrupt the job, records the error, frees ComfyUI,
-and restores the selected LLM.
+The proxy asks ComfyUI to interrupt the job and records the error. It leaves
+ComfyUI as GPU owner and does not contact or restore KoboldCpp.
 
 Check the ComfyUI console for workflow or node errors. Increase
 `--image-timeout` only if the workflow is healthy but legitimately takes
@@ -580,7 +596,10 @@ longer.
 
 The proxy records the cleanup failure and does not reload the LLM because GPU
 release is unconfirmed. Check ComfyUI's `/free` support and console output. The
-broker enters `error` and returns HTTP 503 for queued GPU work until restarted.
+broker stays online in `error`, returns HTTP 503 for coordinated GPU work, and
+does not retry in the background. A later active LLM request can retry cleanup
+once; after cleanup and the exact LLM restore succeed, normal dispatch resumes
+in the same proxy process.
 
 ### HTTP 502 versus HTTP 503
 
@@ -679,11 +698,9 @@ After adapting it to your environment:
 ```
 
 The interactive KoboldCpp list displays paths relative to `models` and omits
-the `.kcpps` extension. After the model choice, pressing Enter at the idle
-restore question leaves proactive restore disabled; answer `y` to pass
-`--restore-llm-on-idle` to the proxy. To select a config without prompts, set
-its relative path with or without the extension and configure idle restore with
-`ST_PROXY_RESTORE_LLM_ON_IDLE` when needed:
+the `.kcpps` extension. It does not offer or enable automatic idle restoration.
+To select a config without prompts, set its relative path with or without the
+extension:
 
 ```bash
 export ST_STACK_KOBOLD_CONFIG='roleplay/gemma4/role-play-no-thinking-goetia-26b'
@@ -735,7 +752,7 @@ Healthy idle states:
 
 ```text
 llm_ready   — the selected LLM owns the GPU
-comfy_ready — ComfyUI owns the GPU until chat or the optional idle restore
+comfy_ready — ComfyUI owns the GPU until an active LLM request needs it
 ```
 
 Safe stop:

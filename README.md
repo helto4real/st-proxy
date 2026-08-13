@@ -30,25 +30,28 @@ the adapter to confirm release. Consecutive image jobs then run serially without
 reloading the LLM between them.
 
 When an LLM request reaches the head of the queue, the broker calls ComfyUI
-`/free`, restores the LLM state captured at startup, verifies readiness, and
-releases the chat request. By default, ComfyUI keeps the GPU until a chat needs
-the LLM. With `--restore-llm-on-idle`, an empty queue starts the configured
-idle timer and the broker performs that same verified restore proactively when
-the timer expires. New work resets the timer. No request can overtake a request
+`/free`, restores the previously observed LLM state, verifies readiness, and
+releases the chat request. ComfyUI keeps the GPU until an active LLM request
+needs it; idle timers, workflow completion/failure, background health checks,
+startup, and shutdown never restore KoboldCpp. No request can overtake a request
 for the other backend.
 
-When the broker starts, it validates the selected LLM lifecycle API, calls
-ComfyUI `/free`, and captures one ready LLM model before accepting chat
-requests. This clears VRAM that a previously used ComfyUI instance may still
-hold. If any startup check fails, chat remains fail-closed with HTTP 503.
+KoboldCpp `GET /api/v1/model` and `GET /v1/models` are passive metadata. They
+never take a chat lease or trigger lifecycle work. While ComfyUI owns the GPU,
+the proxy returns a safe inactive response without contacting KoboldCpp.
 
-For KoboldCpp, startup verifies Model Administration and the `unload_model` and
-`initial_model` options. For Ollama, startup requires exactly one model in
-`/api/ps`; this makes the restore target deterministic.
+KoboldCpp startup is passive: the broker opens its listeners without contacting
+KoboldCpp or changing GPU ownership. The first active chat or workflow validates
+Model Administration and discovers the current model state. Use
+`--check-backend` for an explicit readiness check. Ollama retains its startup
+snapshot requirement so its restore target remains deterministic.
 
 If ComfyUI cleanup or the final LLM readiness check fails, chat remains
 fail-closed and gets HTTP 503. The latest error is visible at
-`GET /broker/status` on either broker port.
+`GET /broker/status` on either broker port. After a runtime ownership failure,
+the broker stays online but does no background recovery. A later active LLM
+request may make one new coordinated attempt; it never treats a failed cleanup
+as released VRAM.
 
 Control traffic, chat streams, normal ComfyUI HTTP traffic, and ComfyUI
 WebSockets use independent connection pools. Pool acquisition and upstream
@@ -208,13 +211,19 @@ Example idle response:
 
 ```json
 {
-  "state": "llm_ready",
+  "responding": true,
+  "ready": true,
+  "state": "awaiting_request",
   "state_age_seconds": 4.2,
   "state_stalled": false,
   "healthy": true,
   "dispatcher_alive": true,
-  "gpu_owner": "llm",
+  "recovering": false,
+  "recovery_attempts": 0,
+  "recovery_retry_seconds": null,
+  "gpu_owner": null,
   "active_chats": 0,
+  "active_llm_metadata": 0,
   "active_comfy_controls": 0,
   "waiting_chats": 0,
   "waiting_images": 0,
@@ -251,7 +260,7 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--reload-timeout` | `ST_PROXY_RELOAD_TIMEOUT` | `600` seconds |
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds |
 | `--idle-timeout` | `ST_PROXY_IDLE_TIMEOUT` | `60` seconds |
-| `--restore-llm-on-idle` | `ST_PROXY_RESTORE_LLM_ON_IDLE` | disabled |
+| `--restore-llm-on-idle` | `ST_PROXY_RESTORE_LLM_ON_IDLE` | deprecated no-op |
 | `--poll-interval` | `ST_PROXY_POLL_INTERVAL` | `0.5` seconds |
 | `--comfy-poll-failure-limit` | `ST_PROXY_COMFY_POLL_FAILURE_LIMIT` | `6` |
 | `--max-workflow-body-bytes` | `ST_PROXY_MAX_WORKFLOW_BODY_BYTES` | `67108864` |

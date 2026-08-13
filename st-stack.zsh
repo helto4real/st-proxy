@@ -52,7 +52,6 @@ typeset -g KOBOLD_CONFIG_DIR="${ST_STACK_KOBOLD_CONFIG_DIR:-${LLM_DIR}/models}"
 typeset -g KOBOLD_CONFIG_SETTING="${ST_STACK_KOBOLD_CONFIG:-}"
 typeset -g KOBOLD_SELECTED_CONFIG=""
 typeset -ga KOBOLD_CONFIG_FILES=()
-typeset -ga PROXY_IDLE_RESTORE_ARGS=()
 
 typeset -gr RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 typeset -gr RUNTIME_DIR="${RUNTIME_BASE}/st-stack-${UID}"
@@ -63,6 +62,8 @@ typeset -gi SHOW_CHILD_LOGS=0
 typeset -gi STOP_ONLY=0
 typeset -gi OWNS_LOCK=0
 typeset -gi CLEANUP_STARTED=0
+typeset -gi SHUTDOWN_REQUESTED=0
+typeset -gi RUNTIME_ACTIVE=0
 typeset -g START_TIMEOUT="${ST_STACK_START_TIMEOUT:-60}"
 typeset -g STOP_TIMEOUT="${ST_STACK_STOP_TIMEOUT:-10}"
 typeset -g PROXY_CHAT_PORT="${ST_PROXY_CHAT_PORT:-5002}"
@@ -217,36 +218,6 @@ prompt_for_kobold_config() {
     done
 }
 
-prompt_for_idle_restore() {
-    local answer
-
-    while true; do
-        print -nru2 -- \
-            "Restore ${LLM_LABEL} after ${PROXY_IDLE_TIMEOUT} seconds of ComfyUI inactivity? [y/N]: "
-        if ! IFS= read -r answer; then
-            typeset -gx ST_PROXY_RESTORE_LLM_ON_IDLE=false
-            log "automatic LLM idle restore disabled"
-            return 0
-        fi
-        case "${(L)answer}" in
-            ""|n|no)
-                typeset -gx ST_PROXY_RESTORE_LLM_ON_IDLE=false
-                PROXY_IDLE_RESTORE_ARGS=()
-                log "automatic LLM idle restore disabled"
-                return 0
-                ;;
-            y|yes)
-                PROXY_IDLE_RESTORE_ARGS=(--restore-llm-on-idle)
-                log "automatic LLM idle restore enabled"
-                return 0
-                ;;
-            *)
-                log "enter y or press Enter to leave automatic restore disabled"
-                ;;
-        esac
-    done
-}
-
 configure_kobold_command() {
     local executable_path
 
@@ -278,9 +249,6 @@ configure_kobold_command() {
     LLM_COMMAND_NAME=${KOBOLD_EXECUTABLE:t:l}
     kobold_config_display_name "${KOBOLD_SELECTED_CONFIG}"
     log "selected KoboldCpp config: ${REPLY}"
-    if [[ -z "${KOBOLD_CONFIG_SETTING}" ]]; then
-        prompt_for_idle_restore || return 1
-    fi
 }
 
 prepare_runtime_dir() {
@@ -397,15 +365,21 @@ alltalk_ready() {
     [[ "${response}" == Ready ]]
 }
 
-broker_healthy() {
-    local response
+typeset -g BROKER_STATUS_RESPONSE=""
+
+broker_status() {
+    BROKER_STATUS_RESPONSE=""
 
     command -v curl >/dev/null 2>&1 || return 1
-    response=$(curl --silent --fail \
+    BROKER_STATUS_RESPONSE=$(curl --silent --fail \
         --connect-timeout 0.5 --max-time 1 \
         "http://127.0.0.1:${PROXY_CHAT_PORT}/broker/status" 2>/dev/null) || return 1
-    [[ "${response}" == *'"healthy": true'* ||
-        "${response}" == *'"healthy":true'* ]]
+    [[ -n "${BROKER_STATUS_RESPONSE}" ]]
+}
+
+broker_status_is_healthy() {
+    [[ "${BROKER_STATUS_RESPONSE}" == *'"healthy": true'* ||
+        "${BROKER_STATUS_RESPONSE}" == *'"healthy":true'* ]]
 }
 
 pgid_file() {
@@ -605,8 +579,7 @@ ensure_service_started() {
                 --comfy-url "${COMFY_URL}" \
                 --chat-port "${PROXY_CHAT_PORT}" \
                 --image-port "${PROXY_IMAGE_PORT}" \
-                --idle-timeout "${PROXY_IDLE_TIMEOUT}" \
-                "${PROXY_IDLE_RESTORE_ARGS[@]}"
+                --idle-timeout "${PROXY_IDLE_TIMEOUT}"
             ;;
         *)
             log "internal error: unknown service ${service}"
@@ -658,14 +631,18 @@ wait_for_proxy() {
     local deadline=$(( SECONDS + START_TIMEOUT ))
 
     while (( SECONDS < deadline )); do
-        if service_running proxy && broker_healthy; then
-            log "proxy is running and healthy"
+        if service_running proxy && broker_status; then
+            if broker_status_is_healthy; then
+                log "proxy is running and healthy"
+            else
+                log "proxy is running in a degraded state; keeping it available"
+            fi
             return 0
         fi
         sleep 0.2
     done
 
-    log "timed out waiting for a healthy proxy"
+    log "timed out waiting for the proxy status endpoint"
     return 1
 }
 
@@ -885,42 +862,88 @@ stop_stack() {
 }
 
 monitor_stack() {
-    local service
+    local current_proxy_state="healthy"
+    local previous_proxy_state="healthy"
+    local silly_available=1
+    local pockettts_available=1
+    local alltalk_available=1
 
     while true; do
-        for service in proxy silly; do
-            if ! service_running "${service}"; then
-                log "${service} exited unexpectedly; stopping the stack"
-                return 1
+        if ! service_running proxy; then
+            current_proxy_state="exited"
+        elif ! broker_status; then
+            current_proxy_state="unresponsive"
+        elif broker_status_is_healthy; then
+            current_proxy_state="healthy"
+        else
+            current_proxy_state="degraded"
+        fi
+
+        if [[ "${current_proxy_state}" != "${previous_proxy_state}" ]]; then
+            case "${current_proxy_state}" in
+                healthy)
+                    log "proxy recovered and reports healthy"
+                    ;;
+                degraded)
+                    log "proxy reports an unhealthy or stalled coordinator; keeping it running"
+                    ;;
+                unresponsive)
+                    log "proxy status endpoint is unavailable; leaving the proxy process running"
+                    ;;
+                exited)
+                    log "proxy exited unexpectedly; keeping the remaining stack running"
+                    ;;
+            esac
+            previous_proxy_state=${current_proxy_state}
+        fi
+
+        if service_running silly; then
+            if (( ! silly_available )); then
+                log "SillyTavern is running again"
+                silly_available=1
             fi
-        done
-        if ! broker_healthy; then
-            log "proxy reports an unhealthy or stalled coordinator; stopping the stack"
-            return 1
+        elif (( silly_available )); then
+            log "SillyTavern is no longer running; keeping the proxy running"
+            silly_available=0
         fi
+
         if ! service_running pockettts && ! pockettts_ready; then
-            log "PocketTTS bridge is no longer running or ready; stopping the stack"
-            return 1
+            if (( pockettts_available )); then
+                log "PocketTTS bridge is no longer running or ready; keeping the proxy running"
+                pockettts_available=0
+            fi
+        elif (( ! pockettts_available )); then
+            log "PocketTTS bridge is running or ready again"
+            pockettts_available=1
         fi
+
         if ! service_running alltalk && ! alltalk_ready; then
-            log "AllTalk is no longer running or ready; stopping the stack"
-            return 1
+            if (( alltalk_available )); then
+                log "AllTalk is no longer running or ready; keeping the proxy running"
+                alltalk_available=0
+            fi
+        elif (( ! alltalk_available )); then
+            log "AllTalk is running or ready again"
+            alltalk_available=1
         fi
         sleep 1
     done
 }
 
 TRAPINT() {
+    SHUTDOWN_REQUESTED=1
     log "received Ctrl-C; stopping the stack"
     exit 130
 }
 
 TRAPTERM() {
+    SHUTDOWN_REQUESTED=1
     log "received SIGTERM; stopping the stack"
     exit 143
 }
 
 TRAPHUP() {
+    SHUTDOWN_REQUESTED=1
     log "received SIGHUP; stopping the stack"
     exit 129
 }
@@ -928,8 +951,14 @@ TRAPHUP() {
 TRAPEXIT() {
     local exit_code=$?
 
-    if (( OWNS_LOCK )); then
+    if (( OWNS_LOCK && (SHUTDOWN_REQUESTED || ! RUNTIME_ACTIVE) )); then
         cleanup || true
+    elif (( OWNS_LOCK )); then
+        log "supervisor exited without an explicit shutdown; leaving services running"
+        rm -f -- "${SUPERVISOR_FILE}"
+        rmdir -- "${LOCK_DIR}" 2>/dev/null || true
+        rmdir -- "${RUNTIME_DIR}" 2>/dev/null || true
+        OWNS_LOCK=0
     fi
     return ${exit_code}
 }
@@ -970,6 +999,7 @@ main() {
         ensure_service_started proxy || return 1
     fi
     wait_for_proxy || return 1
+    RUNTIME_ACTIVE=1
     monitor_stack
 }
 

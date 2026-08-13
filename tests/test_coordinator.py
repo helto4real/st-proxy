@@ -40,6 +40,10 @@ class FakeLlmBackend:
         self.calls.append("snapshot")
         return FakeRestorePoint("startup-model")
 
+    async def observe_ready(self) -> FakeRestorePoint | None:
+        self.calls.append("observe")
+        return FakeRestorePoint("startup-model")
+
     async def release_gpu(self, target: FakeRestorePoint) -> None:
         assert target.identity == "startup-model"
         self.calls.append("release")
@@ -47,12 +51,14 @@ class FakeLlmBackend:
             self.release_failures -= 1
             raise UpstreamError("synthetic release failure")
 
-    async def acquire_gpu(self, target: FakeRestorePoint) -> None:
+    async def acquire_gpu(self, target: FakeRestorePoint | None) -> FakeRestorePoint:
+        assert target is not None
         assert target.identity == "startup-model"
         self.calls.append("acquire")
         if self.acquire_failures:
             self.acquire_failures -= 1
             raise UpstreamError("synthetic acquire failure")
+        return target
 
 
 @dataclass
@@ -209,6 +215,25 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
         self.comfy.completion.set()
         await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
 
+    async def test_passive_metadata_read_delays_workflow_handoff_without_chat_lease(
+        self,
+    ) -> None:
+        async with self.coordinator.passive_llm_metadata() as granted:
+            self.assertTrue(granted)
+            self.assertEqual(self.coordinator.status()["active_chats"], 0)
+            self.assertEqual(self.coordinator.status()["active_llm_metadata"], 1)
+            image_task = asyncio.create_task(self.submit_image())
+            await wait_until(
+                lambda: self.coordinator.status()["state"] == "draining_llm"
+            )
+            self.assertNotIn("release", self.llm.calls)
+
+        response = await image_task
+        self.assertEqual(response.status, 200)
+        self.assertIn("release", self.llm.calls)
+        self.comfy.completion.set()
+        await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+
     async def test_cancelled_image_stops_a_pending_gpu_handoff(self) -> None:
         async with self.coordinator.chat_lease():
             image_task = asyncio.create_task(self.submit_image())
@@ -225,39 +250,34 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("release", self.llm.calls)
         self.assertEqual(self.comfy.calls, ["free"])
 
-    async def test_release_failure_restores_generic_backend(self) -> None:
+    async def test_release_failure_does_not_restore_generic_backend(self) -> None:
         self.llm.release_failures = 1
 
         with self.assertRaisesRegex(HandoffError, "synthetic release failure"):
             await self.submit_image()
 
-        await wait_until(lambda: self.coordinator.status()["state"] == "llm_ready")
+        await wait_until(lambda: self.coordinator.status()["state"] == "error")
         self.assertEqual(
             self.llm.calls,
-            ["validate", "snapshot", "release", "acquire"],
+            ["validate", "snapshot", "release"],
         )
 
-    async def test_idle_timeout_restores_generic_backend(self) -> None:
+    async def test_idle_timeout_never_restores_generic_backend(self) -> None:
         await self.restart_with_idle_timeout(0.02)
 
-        with self.assertLogs("st_proxy.coordinator", level="INFO") as captured:
-            response = await self.submit_image()
-            self.assertEqual(response.status, 200)
-            self.comfy.completion.set()
-            await wait_until(
-                lambda: self.coordinator.status()["state"] == "llm_ready"
-                and "acquire" in self.llm.calls
-            )
+        response = await self.submit_image()
+        self.assertEqual(response.status, 200)
+        self.comfy.completion.set()
+        await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+        await asyncio.sleep(0.06)
 
         self.assertEqual(
             self.llm.calls,
-            ["validate", "snapshot", "release", "acquire"],
+            ["validate", "snapshot", "release"],
         )
-        self.assertEqual(self.comfy.calls, ["free", "submit", "wait", "free"])
-        logs = "\n".join(captured.output)
-        self.assertIn("ComfyUI idle restore timer started", logs)
-        self.assertIn("ComfyUI idle timeout reached", logs)
-        self.assertIn("ComfyUI idle restore completed", logs)
+        self.assertEqual(self.comfy.calls, ["free", "submit", "wait"])
+        self.assertFalse(self.coordinator.status()["idle_restore_enabled"])
+        self.assertFalse(self.coordinator.status()["idle_restore_scheduled"])
 
     async def test_idle_restore_is_disabled_by_default(self) -> None:
         await self.restart_with_config(idle_timeout=0.01)
@@ -277,7 +297,7 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
             pass
         self.assertIn("acquire", self.llm.calls)
 
-    async def test_new_work_cancels_idle_timeout(self) -> None:
+    async def test_repeated_work_never_starts_idle_restore(self) -> None:
         await self.restart_with_idle_timeout(0.08)
 
         first = await self.submit_image()
@@ -297,31 +317,28 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
         await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
         await asyncio.sleep(0.04)
         self.assertEqual(self.llm.calls, ["validate", "snapshot", "release"])
-        await wait_until(
-            lambda: self.coordinator.status()["state"] == "llm_ready"
-            and "acquire" in self.llm.calls
-        )
+        await asyncio.sleep(0.06)
         self.assertEqual(self.llm.calls.count("release"), 1)
-        self.assertEqual(self.llm.calls.count("acquire"), 1)
+        self.assertEqual(self.llm.calls.count("acquire"), 0)
 
-    async def test_idle_restore_readiness_failure_fails_closed(self) -> None:
+    async def test_idle_flag_does_not_trigger_a_failed_restore(self) -> None:
         await self.restart_with_idle_timeout(0.02)
         self.llm.acquire_failures = 1
 
         response = await self.submit_image()
         self.assertEqual(response.status, 200)
         self.comfy.completion.set()
-        await wait_until(lambda: self.coordinator.status()["state"] == "error")
+        await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+        await asyncio.sleep(0.06)
 
         status = self.coordinator.status()
-        self.assertIsNone(status["gpu_owner"])
-        self.assertFalse(status["chat_available"])
+        self.assertEqual(status["gpu_owner"], "comfy")
+        self.assertTrue(status["chat_available"])
         self.assertEqual(status["waiting_chats"], 0)
         self.assertEqual(status["waiting_images"], 0)
-        self.assertIn("synthetic acquire failure", status["last_error"])
         self.assertEqual(
             self.llm.calls,
-            ["validate", "snapshot", "release", "acquire"],
+            ["validate", "snapshot", "release"],
         )
 
     async def test_comfy_control_lease_delays_llm_restore(self) -> None:
@@ -356,6 +373,55 @@ class CoordinatorContractTestCase(unittest.IsolatedAsyncioTestCase):
                 pass
 
         self.assertEqual(self.coordinator.status()["state"], "error")
+        self.assertTrue(self.coordinator.status()["responding"])
+        self.assertFalse(self.coordinator.status()["ready"])
+        self.assertFalse(self.coordinator.status()["recovering"])
+        self.assertNotIn("acquire", self.llm.calls)
+
+    async def test_transient_cleanup_failure_recovers_only_for_next_active_chat(self) -> None:
+        response = await self.submit_image()
+        self.assertEqual(response.status, 200)
+        self.comfy.completion.set()
+        await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+        self.comfy.free_failures = 1
+
+        with self.assertRaisesRegex(ChatUnavailable, "GPU release is not confirmed"):
+            async with self.coordinator.chat_lease():
+                pass
+
+        await asyncio.sleep(0.04)
+        self.assertEqual(self.llm.calls.count("acquire"), 0)
+
+        async with self.coordinator.chat_lease():
+            pass
+        status = self.coordinator.status()
+        self.assertTrue(status["healthy"])
+        self.assertTrue(status["ready"])
+        self.assertEqual(status["recovery_attempts"], 2)
+        self.assertIsNone(status["last_error"])
+        self.assertEqual(self.comfy.calls.count("free"), 3)
+        self.assertEqual(self.llm.calls.count("acquire"), 1)
+
+    async def test_persistent_cleanup_failure_has_no_background_recovery(self) -> None:
+        response = await self.submit_image()
+        self.assertEqual(response.status, 200)
+        self.comfy.completion.set()
+        await wait_until(lambda: self.coordinator.status()["state"] == "comfy_ready")
+        self.comfy.free_failures = 100
+
+        with self.assertRaisesRegex(ChatUnavailable, "GPU release is not confirmed"):
+            async with self.coordinator.chat_lease():
+                pass
+
+        await asyncio.sleep(0.06)
+        status = self.coordinator.status()
+        self.assertTrue(status["responding"])
+        self.assertFalse(status["ready"])
+        self.assertFalse(status["healthy"])
+        self.assertFalse(status["recovering"])
+        self.assertTrue(status["dispatcher_alive"])
+        self.assertEqual(status["gpu_owner"], "comfy")
+        self.assertEqual(status["recovery_attempts"], 1)
         self.assertNotIn("acquire", self.llm.calls)
 
 

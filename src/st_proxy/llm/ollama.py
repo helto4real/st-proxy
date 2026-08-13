@@ -148,6 +148,18 @@ class OllamaBackend:
             )
         return OllamaRestorePoint(models[0])
 
+    async def observe_ready(self) -> OllamaRestorePoint | None:
+        models = await self._running_models()
+        if not models:
+            return None
+        if len(models) != 1:
+            raise backend_error(
+                self.info.label,
+                "ready-state observation",
+                "exactly one loaded model is required",
+            )
+        return OllamaRestorePoint(models[0])
+
     async def release_gpu(self, target: RestorePoint) -> None:
         restore = self._require_target(target)
         LOG.info("%s GPU release requested", self.info.label)
@@ -159,7 +171,13 @@ class OllamaBackend:
         )
         await self._wait_for_models((), self._timeouts.release, "unloaded")
 
-    async def acquire_gpu(self, target: RestorePoint) -> None:
+    async def acquire_gpu(self, target: RestorePoint | None) -> OllamaRestorePoint:
+        if target is None:
+            raise backend_error(
+                self.info.label,
+                "model load",
+                "a restore target is required",
+            )
         restore = self._require_target(target)
         LOG.info("%s GPU acquisition requested", self.info.label)
         await self._set_keep_alive(
@@ -169,3 +187,4 @@ class OllamaBackend:
             self._timeouts.acquire,
         )
         await self._wait_for_models((restore.model,), self._timeouts.acquire, "loaded")
+        return restore

@@ -98,7 +98,7 @@ class OllamaBackendTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["chat_available"])
         self.assertIn("exactly one loaded model", status["last_error"])
 
-    async def test_unload_failure_restores_ollama_and_releases_queue(self) -> None:
+    async def test_unload_failure_does_not_restore_ollama(self) -> None:
         self.ollama.unload_failures = 1
         async with self.client.post(
             f"{self.image_url}/prompt",
@@ -109,14 +109,13 @@ class OllamaBackendTestCase(unittest.IsolatedAsyncioTestCase):
         await wait_until(
             lambda: (
                 self.service.coordinator is not None
-                and self.service.coordinator.status()["state"] == "llm_ready"
+                and self.service.coordinator.status()["state"] == "error"
             )
         )
         self.assertEqual(
             self.ollama.lifecycle_calls,
             [
                 ("synthetic-model:latest", 0),
-                ("synthetic-model:latest", -1),
             ],
         )
         self.assertEqual(self.ollama.loaded_models, ["synthetic-model:latest"])

@@ -22,6 +22,8 @@ class KoboldCppRestorePoint:
 
 
 class KoboldCppBackend:
+    _INACTIVE_MODEL_NAMES = {"", "inactive", "unloaded", "none", "no model"}
+
     def __init__(
         self,
         session: ClientSession,
@@ -82,20 +84,42 @@ class KoboldCppBackend:
         except (ClientError, TimeoutError) as exc:
             raise backend_error(self.info.label, filename, type(exc).__name__) from exc
 
-    async def _model_name(self) -> str | None:
+    async def _read_model_name(self) -> str:
         try:
             async with self._session.get(
                 child_url(self.info.chat_origin, "/api/v1/model")
             ) as response:
                 if response.status >= 400:
-                    return None
+                    raise backend_error(
+                        self.info.label,
+                        "model-state observation",
+                        f"HTTP {response.status}",
+                    )
                 payload = await response.json(content_type=None)
-        except (ClientError, TimeoutError, ValueError):
-            return None
+        except UpstreamError:
+            raise
+        except (ClientError, TimeoutError, ValueError) as exc:
+            raise backend_error(
+                self.info.label,
+                "model-state observation",
+                type(exc).__name__,
+            ) from exc
         result = payload.get("result") if isinstance(payload, dict) else None
         if isinstance(result, list):
             result = result[0] if result else None
-        return str(result).strip() if result is not None else None
+        if result is None:
+            raise backend_error(
+                self.info.label,
+                "model-state observation",
+                "invalid API response",
+            )
+        return str(result).strip()
+
+    async def _model_name(self) -> str | None:
+        try:
+            return await self._read_model_name()
+        except UpstreamError:
+            return None
 
     async def _version_ready(self) -> bool:
         try:
@@ -106,6 +130,15 @@ class KoboldCppBackend:
                 return response.status < 400
         except (ClientError, TimeoutError):
             return False
+
+    async def observe_ready(self) -> KoboldCppRestorePoint | None:
+        """Inspect the current state once; never wait for or trigger a model load."""
+        model = await self._read_model_name()
+        if not await self._version_ready():
+            raise backend_error(self.info.label, "ready-state observation", "unavailable")
+        if not model or model.lower() in self._INACTIVE_MODEL_NAMES:
+            return None
+        return KoboldCppRestorePoint(model)
 
     async def validate_control(self) -> None:
         setup_guidance = (
@@ -174,13 +207,12 @@ class KoboldCppBackend:
             expected_state,
             timeout_seconds,
         )
-        inactive_names = {"", "inactive", "unloaded", "none", "no model"}
         try:
             async with asyncio.timeout_at(deadline):
                 while True:
                     model = await self._model_name()
                     version_ready = await self._version_ready()
-                    is_loaded = bool(model) and model.lower() not in inactive_names
+                    is_loaded = bool(model) and model.lower() not in self._INACTIVE_MODEL_NAMES
                     expected_model_ready = (
                         not loaded or expected_model is None or model == expected_model
                     )
@@ -212,11 +244,17 @@ class KoboldCppBackend:
         await self._reload_config("unload_model", self._timeouts.release)
         await self._wait_for_model(loaded=False, timeout_seconds=self._timeouts.release)
 
-    async def acquire_gpu(self, target: RestorePoint) -> None:
-        restore = self._require_target(target)
+    async def acquire_gpu(
+        self,
+        target: RestorePoint | None,
+    ) -> KoboldCppRestorePoint:
+        restore = self._require_target(target) if target is not None else None
         await self._reload_config("initial_model", self._timeouts.acquire)
-        await self._wait_for_model(
+        model = await self._wait_for_model(
             loaded=True,
             timeout_seconds=self._timeouts.acquire,
-            expected_model=restore.model,
+            expected_model=restore.model if restore is not None else None,
         )
+        if not model:
+            raise backend_error(self.info.label, "model load", "model is unknown")
+        return restore or KoboldCppRestorePoint(model)

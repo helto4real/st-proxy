@@ -42,17 +42,20 @@ class MockKobold:
     admin_calls: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
     version_paths: list[str] = field(default_factory=list)
+    metadata_paths: list[str] = field(default_factory=list)
     chat_requests: int = 0
     chat_started: asyncio.Event = field(default_factory=asyncio.Event)
     chat_release: asyncio.Event = field(default_factory=asyncio.Event)
     hold_chat: bool = False
     admin_authorization: list[str | None] = field(default_factory=list)
+    request_paths: list[str] = field(default_factory=list)
 
     def app(self) -> web.Application:
         app = web.Application()
         app.router.add_post("/api/admin/reload_config", self.admin)
         app.router.add_get("/api/admin/list_options", self.list_options)
         app.router.add_get("/api/v1/model", self.get_model)
+        app.router.add_get("/v1/models", self.get_models)
         app.router.add_get("/api/v1/info/version", self.version)
         app.router.add_get("/api/extra/version", self.version)
         app.router.add_route("*", "/api/extra/generate/stream", self.stream)
@@ -61,6 +64,7 @@ class MockKobold:
         return app
 
     async def admin(self, request: web.Request) -> web.Response:
+        self.request_paths.append(request.path)
         payload = await request.json()
         filename = payload["filename"]
         self.admin_calls.append(filename)
@@ -80,20 +84,31 @@ class MockKobold:
             self.model = self.reload_model
         return web.json_response({"success": True})
 
-    async def get_model(self, _request: web.Request) -> web.Response:
+    async def get_model(self, request: web.Request) -> web.Response:
+        self.request_paths.append(request.path)
+        self.metadata_paths.append(request.path)
         return web.json_response({"result": self.model})
 
+    async def get_models(self, request: web.Request) -> web.Response:
+        self.request_paths.append(request.path)
+        self.metadata_paths.append(request.path)
+        data = [] if self.model == "inactive" else [{"id": self.model, "object": "model"}]
+        return web.json_response({"object": "list", "data": data})
+
     async def version(self, request: web.Request) -> web.Response:
+        self.request_paths.append(request.path)
         self.version_paths.append(request.path)
         return web.json_response(
             {"version": "test-fixture", "admin": 1 if self.admin_enabled else 0}
         )
 
-    async def list_options(self, _request: web.Request) -> web.Response:
+    async def list_options(self, request: web.Request) -> web.Response:
+        self.request_paths.append(request.path)
         options = ["initial_model", "unload_model"] if self.admin_enabled else []
         return web.json_response(options)
 
     async def stream(self, _request: web.Request) -> web.StreamResponse:
+        self.request_paths.append(_request.path)
         self.chat_requests += 1
         self.events.append("chat_started")
         self.chat_started.set()
@@ -108,11 +123,13 @@ class MockKobold:
         return response
 
     async def generate(self, _request: web.Request) -> web.Response:
+        self.request_paths.append(_request.path)
         self.chat_requests += 1
         self.events.append("chat_generate")
         return web.json_response({"results": [{"text": "synthetic"}]})
 
     async def generic(self, _request: web.Request) -> web.Response:
+        self.request_paths.append(_request.path)
         return web.json_response({"ok": True})
 
 
@@ -121,6 +138,7 @@ class MockComfy:
     auto_complete: bool = True
     fail_next_job: bool = False
     cleanup_failures: int = 0
+    cleanup_failure_status: int = 500
     history_failures: int = 0
     prompt_calls: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
@@ -185,7 +203,10 @@ class MockComfy:
         self.events.append("free")
         if self.cleanup_failures:
             self.cleanup_failures -= 1
-            return web.json_response({"error": "synthetic cleanup failure"}, status=500)
+            return web.json_response(
+                {"error": "synthetic cleanup failure"},
+                status=self.cleanup_failure_status,
+            )
         return web.json_response({"ok": True})
 
     async def interrupt(self, _request: web.Request) -> web.Response:

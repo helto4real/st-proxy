@@ -162,8 +162,10 @@ case "$url" in
         service_alive proxy || exit 1
         unhealthy_file=${FAKE_BROKER_UNHEALTHY_FILE:-}
         if [ -n "$unhealthy_file" ] && [ -e "$unhealthy_file" ]; then
+            printf 'broker-status:unhealthy\n' >> "$STACK_CURL_LOG"
             printf '{"healthy":false}'
         else
+            printf 'broker-status:healthy\n' >> "$STACK_CURL_LOG"
             printf '{"healthy":true}'
         fi
         ;;
@@ -329,14 +331,8 @@ def test_koboldcpp_config_setting_accepts_relative_name_without_extension(
     assert "Select configuration" not in output
 
 
-@pytest.mark.parametrize(
-    ("idle_restore_answer", "restore_enabled"),
-    [("maybe\n\n", False), ("y\n", True)],
-)
-def test_koboldcpp_prompts_with_sorted_names_and_idle_restore_choice(
+def test_koboldcpp_prompts_with_sorted_names_without_idle_restore(
     fake_stack: FakeStack,
-    idle_restore_answer: str,
-    restore_enabled: bool,
 ) -> None:
     first = fake_stack.llm_dir / "models" / "general" / "alpha.kcpps"
     selected = (
@@ -352,9 +348,7 @@ def test_koboldcpp_prompts_with_sorted_names_and_idle_restore_choice(
     fake_stack.env.pop("ST_STACK_LLM_COMMAND")
     fake_stack.env.pop("ST_STACK_KOBOLD_CONFIG", None)
 
-    supervisor = fake_stack.start(
-        stdin_data="0\nnot-a-number\n2\n" + idle_restore_answer
-    )
+    supervisor = fake_stack.start(stdin_data="0\nnot-a-number\n2\n")
     events = fake_stack.wait_for_services(
         supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
     )
@@ -375,15 +369,8 @@ def test_koboldcpp_prompts_with_sorted_names_and_idle_restore_choice(
     assert "  2) roleplay/gemma4/primary config" in output
     assert "Select configuration [1-2]:" in output
     assert output.count("enter a number between 1 and 2") == 2
-    assert "Restore KoboldCpp after 60 seconds of ComfyUI inactivity? [y/N]:" in output
-    assert ("--restore-llm-on-idle" in proxy_command) is restore_enabled
-    if restore_enabled:
-        assert "automatic LLM idle restore enabled" in output
-    else:
-        assert output.count(
-            "enter y or press Enter to leave automatic restore disabled"
-        ) == 1
-        assert "automatic LLM idle restore disabled" in output
+    assert "Restore KoboldCpp" not in output
+    assert "--restore-llm-on-idle" not in proxy_command
     assert "primary config.kcpps" not in output
 
 
@@ -642,21 +629,78 @@ def test_monitor_allows_adapter_to_stop_llm_process(fake_stack: FakeStack) -> No
     assert supervisor.returncode == 130, output
 
 
-def test_monitor_stops_when_broker_reports_backend_unavailable(
+def test_monitor_keeps_proxy_running_when_sillytavern_exits(
+    fake_stack: FakeStack,
+) -> None:
+    supervisor = fake_stack.start()
+    events = fake_stack.wait_for_services(
+        supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
+    )
+    silly_pid = next(pid for service, _cwd, pid in events if service == "silly")
+    proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
+
+    try:
+        os.killpg(silly_pid, signal.SIGTERM)
+        time.sleep(1.5)
+        assert supervisor.poll() is None
+        os.kill(proxy_pid, 0)
+    finally:
+        if supervisor.poll() is None:
+            supervisor.send_signal(signal.SIGINT)
+        output = supervisor.communicate(timeout=12)[0]
+
+    assert supervisor.returncode == 130, output
+    assert "SillyTavern is no longer running; keeping the proxy running" in output
+
+
+def test_monitor_keeps_proxy_running_when_broker_reports_backend_unavailable(
     fake_stack: FakeStack,
 ) -> None:
     unhealthy_file = fake_stack.root / "broker-unhealthy"
     fake_stack.env["FAKE_BROKER_UNHEALTHY_FILE"] = str(unhealthy_file)
     supervisor = fake_stack.start()
-    fake_stack.wait_for_services(
+    events = fake_stack.wait_for_services(
         supervisor, {"llm", "silly", "pockettts", "alltalk", "proxy"}
     )
-    time.sleep(0.5)
-    unhealthy_file.touch()
-    output = supervisor.communicate(timeout=12)[0]
+    proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
 
-    assert supervisor.returncode == 1
-    assert "proxy reports an unhealthy or stalled coordinator" in output
+    def wait_for_status_marker(marker: str, previous_count: int = 0) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            entries = fake_stack.curl_log.read_text(encoding="utf-8").splitlines()
+            if entries.count(marker) > previous_count:
+                return
+            time.sleep(0.05)
+        pytest.fail(f"timed out waiting for {marker}")
+
+    try:
+        wait_for_status_marker("broker-status:healthy")
+        unhealthy_file.touch()
+        wait_for_status_marker("broker-status:unhealthy")
+        assert supervisor.poll() is None
+        os.kill(proxy_pid, 0)
+
+        healthy_count = fake_stack.curl_log.read_text(encoding="utf-8").splitlines().count(
+            "broker-status:healthy"
+        )
+        unhealthy_file.unlink()
+        wait_for_status_marker("broker-status:healthy", healthy_count)
+        observed_healthy_count = (
+            fake_stack.curl_log.read_text(encoding="utf-8")
+            .splitlines()
+            .count("broker-status:healthy")
+        )
+        wait_for_status_marker("broker-status:healthy", observed_healthy_count)
+        assert supervisor.poll() is None
+        os.kill(proxy_pid, 0)
+    finally:
+        if supervisor.poll() is None:
+            supervisor.send_signal(signal.SIGINT)
+        output = supervisor.communicate(timeout=12)[0]
+
+    assert supervisor.returncode == 130, output
+    assert "proxy reports an unhealthy or stalled coordinator; keeping it running" in output
+    assert "proxy recovered and reports healthy" in output
 
 
 def test_proxy_waits_for_alltalk_ready_response(fake_stack: FakeStack) -> None:

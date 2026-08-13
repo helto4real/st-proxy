@@ -38,11 +38,14 @@ class LlmBackend(Protocol[RestorePointT]):
     async def snapshot_ready(self) -> RestorePointT:
         """Verify readiness and return the exact state that must later be restored."""
 
+    async def observe_ready(self) -> RestorePointT | None:
+        """Return the currently loaded state without waiting for or loading a model."""
+
     async def release_gpu(self, target: RestorePointT) -> None:
         """Return only after the backend has confirmed that its GPU resources are released."""
 
-    async def acquire_gpu(self, target: RestorePointT) -> None:
-        """Restore target and return only after the backend is confirmed ready."""
+    async def acquire_gpu(self, target: RestorePointT | None) -> RestorePointT:
+        """Restore target, or the configured default, and return the confirmed state."""
 
 
 def backend_error(label: str, action: str, detail: str | None = None) -> UpstreamError:

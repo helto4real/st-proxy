@@ -108,24 +108,26 @@ request body is released immediately after the upstream response.
    authoritative completion signal.
 6. Successful completion enters `comfy_ready`, the warm idle state. Consecutive
    workflows reuse the same ownership period.
-7. A chat at the FIFO head starts the reverse handoff. When
-   `restore_llm_on_idle` is enabled, the idle deadline can start the same
-   handoff proactively. Active ComfyUI control requests drain first, `/free`
-   must succeed, the LLM restore point is acquired, and readiness is verified
-   before chat starts.
+7. Only an active LLM request at the FIFO head starts the reverse handoff.
+   Active ComfyUI control requests drain first, `/free` must succeed, the LLM
+   restore point is acquired, and readiness is verified before chat starts.
 
 ## Failure boundary
 
-Ownership is `unknown` during every transition. The coordinator never grants
+Ownership is `unknown` during transitions where the current owner is no longer
+confirmed. The coordinator never grants
 the destination backend before the source release succeeds. In particular, a
 failed or timed-out ComfyUI cleanup no longer attempts to reload the LLM: the
-broker enters `error`, rejects queued GPU work, and reports the sanitized cause
-through `/broker/status`.
+broker enters `error` and reports the sanitized cause through `/broker/status`.
+It performs no background retry. A later active LLM request can make one new
+cleanup-and-restore attempt; no idle, workflow, lifecycle, or shutdown event
+may load KoboldCpp.
 
 Status includes coordinator health, dispatcher liveness, state age, stall
 classification, active transport counts, and queued workflow bytes. The local
-stack supervisor uses `healthy`, rather than the intentionally permissive
-`chat_available`, for its watchdog decision.
+stack supervisor treats the status endpoint as liveness and `healthy` as
+readiness: degraded status is logged but never converted into an implicit
+stack shutdown.
 
 This is logical VRAM ownership through application lifecycle APIs. It cannot
 revoke CUDA device access from a misbehaving process. Hard device exclusion
