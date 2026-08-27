@@ -29,7 +29,10 @@ class WorkflowBodyTooLarge(ValueError):
 
 def _is_routine_comfy_poll(request: web.Request) -> bool:
     return request.method == "GET" and (
-        request.path == "/history" or request.path.startswith("/history/")
+        request.path == "/history"
+        or request.path.startswith("/history/")
+        or request.path == "/api/jobs"
+        or request.path.endswith("/jobs/status")
     )
 
 

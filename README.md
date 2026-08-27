@@ -253,9 +253,9 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` |
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset |
 | `--connect-timeout` | `ST_PROXY_CONNECT_TIMEOUT` | `30` seconds |
-| `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `600` seconds read-idle |
+| `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `3900` seconds read-idle |
 | `--image-timeout` | `ST_PROXY_IMAGE_TIMEOUT` | `1800` seconds |
-| `--chat-drain-timeout` | `ST_PROXY_CHAT_DRAIN_TIMEOUT` | `1800` seconds |
+| `--chat-drain-timeout` | `ST_PROXY_CHAT_DRAIN_TIMEOUT` | `3900` seconds |
 | `--unload-timeout` | `ST_PROXY_UNLOAD_TIMEOUT` | `180` seconds |
 | `--reload-timeout` | `ST_PROXY_RELOAD_TIMEOUT` | `600` seconds |
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds |

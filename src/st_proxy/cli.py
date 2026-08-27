@@ -78,10 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prefer ST_PROXY_KOBOLD_ADMIN_PASSWORD to avoid shell history",
     )
     parser.add_argument("--connect-timeout", type=float, default=_env_float("CONNECT_TIMEOUT", 30))
-    parser.add_argument("--request-timeout", type=float, default=_env_float("REQUEST_TIMEOUT", 600))
+    parser.add_argument(
+        "--request-timeout", type=float, default=_env_float("REQUEST_TIMEOUT", 3900)
+    )
     parser.add_argument("--image-timeout", type=float, default=_env_float("IMAGE_TIMEOUT", 1800))
     parser.add_argument(
-        "--chat-drain-timeout", type=float, default=_env_float("CHAT_DRAIN_TIMEOUT", 1800)
+        "--chat-drain-timeout", type=float, default=_env_float("CHAT_DRAIN_TIMEOUT", 3900)
     )
     parser.add_argument("--unload-timeout", type=float, default=_env_float("UNLOAD_TIMEOUT", 180))
     parser.add_argument("--reload-timeout", type=float, default=_env_float("RELOAD_TIMEOUT", 600))

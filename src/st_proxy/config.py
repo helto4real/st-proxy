@@ -70,9 +70,9 @@ class BrokerConfig:
     comfy_url: str = "http://127.0.0.1:8189"
     kobold_admin_password: str | None = None
     connect_timeout: float = 30.0
-    request_timeout: float = 600.0
+    request_timeout: float = 3900.0
     image_timeout: float = 1800.0
-    chat_drain_timeout: float = 1800.0
+    chat_drain_timeout: float = 3900.0
     unload_timeout: float = 180.0
     reload_timeout: float = 600.0
     cleanup_timeout: float = 60.0

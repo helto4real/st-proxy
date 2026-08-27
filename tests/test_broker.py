@@ -221,14 +221,28 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("body-secret", logs)
         self.assertNotIn("SyntheticNode", logs)
 
-    async def test_routine_comfy_history_polling_is_debug_only(self) -> None:
+    async def test_routine_comfy_polling_is_debug_only(self) -> None:
         with self.assertLogs("st_proxy.service", level="DEBUG") as captured:
             async with self.client.get(f"{self.image_url}/history") as response:
+                self.assertEqual(response.status, 200)
+            async with self.client.get(
+                f"{self.image_url}/helto_director/prompt_studio/bridge/jobs/status"
+            ) as response:
+                self.assertEqual(response.status, 200)
+            async with self.client.get(f"{self.image_url}/api/jobs") as response:
                 self.assertEqual(response.status, 200)
 
         history_logs = [message for message in captured.output if "path=/history" in message]
         self.assertEqual(len(history_logs), 2)
         self.assertTrue(all(message.startswith("DEBUG:") for message in history_logs))
+        job_status_logs = [
+            message for message in captured.output if "path=/helto_director/" in message
+        ]
+        self.assertEqual(len(job_status_logs), 2)
+        self.assertTrue(all(message.startswith("DEBUG:") for message in job_status_logs))
+        api_jobs_logs = [message for message in captured.output if "path=/api/jobs" in message]
+        self.assertEqual(len(api_jobs_logs), 2)
+        self.assertTrue(all(message.startswith("DEBUG:") for message in api_jobs_logs))
 
     async def test_comfy_websocket_stays_connected_across_gpu_handoffs(self) -> None:
         websocket = await self.client.ws_connect(

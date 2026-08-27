@@ -17,6 +17,8 @@ def test_default_cli_uses_koboldcpp_compatibility_defaults() -> None:
     assert config.llm_backend == "koboldcpp"
     assert config.llm_url == "http://127.0.0.1:5002"
     assert config.connect_timeout == 30
+    assert config.request_timeout == 3900
+    assert config.chat_drain_timeout == 3900
     assert config.idle_timeout == 60
     assert not config.restore_llm_on_idle
     assert config.comfy_poll_failure_limit == 6

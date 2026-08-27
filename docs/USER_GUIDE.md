@@ -451,9 +451,9 @@ environment.
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` | Real ComfyUI origin |
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset | KoboldCpp Admin bearer password |
 | `--connect-timeout` | `ST_PROXY_CONNECT_TIMEOUT` | `30` seconds | Maximum pool-acquisition and socket-connect wait |
-| `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `600` seconds | Maximum idle wait between upstream response bytes |
+| `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `3900` seconds | Maximum idle wait between upstream response bytes |
 | `--image-timeout` | `ST_PROXY_IMAGE_TIMEOUT` | `1800` seconds | Maximum monitored image-job duration |
-| `--chat-drain-timeout` | `ST_PROXY_CHAT_DRAIN_TIMEOUT` | `1800` seconds | Maximum wait for active chats to finish |
+| `--chat-drain-timeout` | `ST_PROXY_CHAT_DRAIN_TIMEOUT` | `3900` seconds | Maximum wait for active chats to finish |
 | `--unload-timeout` | `ST_PROXY_UNLOAD_TIMEOUT` | `180` seconds | Maximum LLM release/verification time |
 | `--reload-timeout` | `ST_PROXY_RELOAD_TIMEOUT` | `600` seconds | Maximum LLM restore/verification time |
 | `--cleanup-timeout` | `ST_PROXY_CLEANUP_TIMEOUT` | `60` seconds | Maximum ComfyUI cleanup time |
