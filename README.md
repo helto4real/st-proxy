@@ -39,6 +39,7 @@ for the other backend.
 KoboldCpp `GET /api/v1/model` and `GET /v1/models` are passive metadata. They
 never take a chat lease or trigger lifecycle work. While ComfyUI owns the GPU,
 the proxy returns a safe inactive response without contacting KoboldCpp.
+In Router mode, `/v1/models` instead returns the cached available profiles.
 
 KoboldCpp startup is passive: the broker opens its listeners without contacting
 KoboldCpp or changing GPU ownership. The first active chat or workflow validates
@@ -124,6 +125,69 @@ export ST_PROXY_KOBOLD_ADMIN_PASSWORD='replace-me'
 On Windows, use the equivalent KoboldCpp GUI fields: port `5002`, host
 `127.0.0.1`, Admin enabled, and an Admin/config directory. Keep the model you
 want restored selected as the startup model.
+
+### KoboldCpp native Router mode
+
+Enable this mode to let KoboldCpp select a `.kcpps` profile from the request's
+`model` field. The broker still owns the GPU handoff to/from ComfyUI. It admits
+one model-dependent request at a time and holds the reservation throughout
+loading, generation and the complete upstream response, including disconnected
+streams. It does not restore `initial_model` before forwarding a selected model.
+Missing/null/empty text-request model fields use `initial_model`.
+
+Start KoboldCpp with `--admin --routermode --admindir /path/to/profiles` in
+addition to the normal startup configuration. Then export a passive model cache
+and enable the broker mode (adjust origins and listener ports to your setup):
+
+```bash
+st-vram-proxy --llm-url http://127.0.0.1:5002 --kobold-router-mode \
+  --check-backend --write-kobold-model-cache /tmp/kobold-models.json
+st-vram-proxy --llm-url http://127.0.0.1:5002 --kobold-router-mode \
+  --kobold-model-cache /tmp/kobold-models.json
+```
+
+Select the exact profile ID returned by the broker's `/v1/models` in an
+OpenAI-compatible client. The list includes `.kcpps` profiles and `initial_model`,
+not unload commands or claims that every profile is loaded. Without an initial
+cache, only `initial_model` is listed until discovery can run under an idle LLM
+reservation. Lists remain cached during ComfyUI work and active LLM requests;
+GET discovery never loads models. Generic read-only metadata and abort also
+bypass GPU acquisition. Abort is admitted while a model-dependent request is
+active; it does not queue behind that request.
+
+Text completions, chat completions, Kobold generation/streaming and token counts
+are supported; `/api/latest/generate` and `/api/extra/tokenize` are normalized to
+the native router's wake endpoints. Clients must send the same `model` when
+counting tokens and generating. Other explicit model IDs retain KoboldCpp's
+native behavior, including its handling of unknown IDs. Context/capability
+metadata describes the currently loaded model, not every listed profile.
+
+The status `llm_reserved` means KoboldCpp has exclusive permission to use the
+GPU, not that a particular model is already loaded. A subsequent ComfyUI job
+requires a confirmed `unload_model`, including after a failed router request.
+Runtime failures keep the broker alive and never start background reloads.
+Direct `/api/admin/reload_config` and `/noscript` calls through the broker are
+blocked in this mode to prevent bypassing coordinated generation/lifecycle work.
+
+The router transport supplies `Content-Length` and buffers only an admitted
+request, capped by `--max-chat-body-bytes` (32 MiB by default). Queueing clients
+are not eagerly read into full request buffers. Router loading has its own
+backend timeout; the broker's `request_timeout` also bounds upstream read-idle.
+
+The standard `st-stack.zsh` KoboldCpp launch enables Router mode automatically,
+retains the selected startup profile and exposes all recursively discovered
+profiles through temporary flat symlinks. Profile IDs use the original basename
+plus a stable relative-path hash, avoiding collisions between subdirectories.
+The script exports the initial cache during readiness. Original profiles and
+their relative-path working directory are unchanged. Restart the stack to
+refresh profile links; runtime files are removed only after services stop.
+
+Set `ST_PROXY_KOBOLD_ROUTER_MODE=false` for the old single-profile stack mode.
+An explicit `ST_STACK_LLM_COMMAND` retains legacy behavior unless Router mode is
+explicitly enabled; its command must then enable native Router mode itself.
+An already running non-router backend must be restarted with the required flags.
+Use regular Router mode for this text-profile integration; autoswap/multimodal
+configuration management and direct backend clients are outside this contract.
 
 ### Ollama
 
@@ -252,6 +316,10 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` |
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset |
+| `--kobold-router-mode` | `ST_PROXY_KOBOLD_ROUTER_MODE` | disabled (standard stack launch enables it) |
+| `--kobold-model-cache` | `ST_PROXY_KOBOLD_MODEL_CACHE` | unset |
+| `--max-chat-body-bytes` | `ST_PROXY_MAX_CHAT_BODY_BYTES` | `33554432` |
+| `--write-kobold-model-cache` | — | explicit export with `--check-backend` |
 | `--connect-timeout` | `ST_PROXY_CONNECT_TIMEOUT` | `30` seconds |
 | `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `3900` seconds read-idle |
 | `--image-timeout` | `ST_PROXY_IMAGE_TIMEOUT` | `1800` seconds |

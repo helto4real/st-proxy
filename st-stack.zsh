@@ -52,9 +52,24 @@ typeset -g KOBOLD_CONFIG_DIR="${ST_STACK_KOBOLD_CONFIG_DIR:-${LLM_DIR}/models}"
 typeset -g KOBOLD_CONFIG_SETTING="${ST_STACK_KOBOLD_CONFIG:-}"
 typeset -g KOBOLD_SELECTED_CONFIG=""
 typeset -ga KOBOLD_CONFIG_FILES=()
+typeset -g KOBOLD_ROUTER_MODE="${ST_PROXY_KOBOLD_ROUTER_MODE:-}"
+if [[ -z "${KOBOLD_ROUTER_MODE}" ]]; then
+    KOBOLD_ROUTER_MODE=false
+    if [[ "${LLM_BACKEND}" == koboldcpp ]] && (( ! LLM_COMMAND_EXPLICIT )); then
+        KOBOLD_ROUTER_MODE=true
+    fi
+fi
+typeset -ga PROXY_ROUTER_ARGS=()
+case "${KOBOLD_ROUTER_MODE:l}" in
+    1|true|yes|on) PROXY_ROUTER_ARGS=(--kobold-router-mode) ;;
+    0|false|no|off) ;;
+    *) print -ru2 -- "ST_PROXY_KOBOLD_ROUTER_MODE must be a boolean"; exit 2 ;;
+esac
+typeset -g KOBOLD_ADMIN_DIR=""
 
 typeset -gr RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 typeset -gr RUNTIME_DIR="${RUNTIME_BASE}/st-stack-${UID}"
+typeset -gr KOBOLD_MODEL_CACHE="${RUNTIME_DIR}/kobold-models.json"
 typeset -gr LOCK_DIR="${RUNTIME_DIR}/supervisor.lock"
 typeset -gr SUPERVISOR_FILE="${RUNTIME_DIR}/supervisor.pid"
 
@@ -220,6 +235,7 @@ prompt_for_kobold_config() {
 
 configure_kobold_command() {
     local executable_path
+    local config relative digest linkname
 
     (( LLM_COMMAND_EXPLICIT )) && return 0
     discover_kobold_configs || return 1
@@ -246,6 +262,17 @@ configure_kobold_command() {
     fi
 
     LLM_COMMAND=("${KOBOLD_EXECUTABLE}" --config "${KOBOLD_SELECTED_CONFIG}")
+    if (( ${#PROXY_ROUTER_ARGS} )); then
+        KOBOLD_ADMIN_DIR=$(mktemp -d "${RUNTIME_DIR}/kobold-admin.XXXXXX") || return 1
+        for config in "${KOBOLD_CONFIG_FILES[@]}"; do
+            relative=${config#${KOBOLD_CONFIG_DIR}/}
+            digest=$(print -rn -- "${relative}" | sha256sum) || return 1
+            digest=${digest%% *}
+            linkname="${config:t:r}--${digest[1,12]}.kcpps"
+            ln -s -- "${config}" "${KOBOLD_ADMIN_DIR}/${linkname}" || return 1
+        done
+        LLM_COMMAND+=(--admin --routermode --admindir "${KOBOLD_ADMIN_DIR}")
+    fi
     LLM_COMMAND_NAME=${KOBOLD_EXECUTABLE:t:l}
     kobold_config_display_name "${KOBOLD_SELECTED_CONFIG}"
     log "selected KoboldCpp config: ${REPLY}"
@@ -345,7 +372,7 @@ llm_ready() {
         --check-backend \
         --backend-check-timeout 1 \
         --llm-backend "${LLM_BACKEND}" \
-        --llm-url "${LLM_URL}" >/dev/null 2>&1
+        --llm-url "${LLM_URL}" "${PROXY_ROUTER_ARGS[@]}" >/dev/null 2>&1
 }
 
 pockettts_ready() {
@@ -573,13 +600,18 @@ ensure_service_started() {
             ;;
         proxy)
             log "starting proxy in ${SCRIPT_DIR}"
+            local -a cache_args=()
+            if (( ${#PROXY_ROUTER_ARGS} )); then
+                cache_args=(--kobold-model-cache "${KOBOLD_MODEL_CACHE}")
+            fi
             launch_in_directory proxy "${SCRIPT_DIR}" 0 "${PROXY_COMMAND}" \
                 --llm-backend "${LLM_BACKEND}" \
                 --llm-url "${LLM_URL}" \
                 --comfy-url "${COMFY_URL}" \
                 --chat-port "${PROXY_CHAT_PORT}" \
                 --image-port "${PROXY_IMAGE_PORT}" \
-                --idle-timeout "${PROXY_IDLE_TIMEOUT}"
+                --idle-timeout "${PROXY_IDLE_TIMEOUT}" \
+                "${PROXY_ROUTER_ARGS[@]}" "${cache_args[@]}"
             ;;
         *)
             log "internal error: unknown service ${service}"
@@ -605,19 +637,14 @@ wait_for_pockettts() {
 
 wait_for_dependencies() {
     local deadline=$(( SECONDS + START_TIMEOUT ))
-    local service
     local -a missing
 
     while (( SECONDS < deadline )); do
         missing=()
         llm_ready || missing+=(llm)
         pockettts_ready || missing+=(pockettts)
-        alltalk_ready || missing+=(alltalk)
-        for service in silly; do
-            service_running "${service}" || missing+=("${service}")
-        done
         if (( ${#missing} == 0 )); then
-            log "${LLM_LABEL}, SillyTavern, PocketTTS bridge and AllTalk are running"
+            log "${LLM_LABEL} and PocketTTS bridge are running"
             return 0
         fi
         sleep 0.2
@@ -765,6 +792,16 @@ stop_service() {
     log "${service} stopped"
 }
 
+cleanup_kobold_runtime() {
+    local directory
+    # Called only after managed services have stopped. Never follow profile links.
+    for directory in "${RUNTIME_DIR}"/kobold-admin.*(N/); do
+        rm -f -- "${directory}"/*.kcpps(N@)
+        rmdir -- "${directory}" 2>/dev/null || true
+    done
+    rm -f -- "${KOBOLD_MODEL_CACHE}" "${KOBOLD_MODEL_CACHE:r}.tmp"
+}
+
 cleanup() {
     local result=0
 
@@ -772,10 +809,10 @@ cleanup() {
     CLEANUP_STARTED=1
 
     stop_service proxy || result=1
-    stop_service alltalk || result=1
     stop_service pockettts || result=1
-    stop_service silly || result=1
     stop_service llm || result=1
+
+    (( result == 0 )) && cleanup_kobold_runtime
 
     if (( OWNS_LOCK )); then
         rm -f -- "${SUPERVISOR_FILE}"
@@ -847,10 +884,9 @@ stop_stack() {
 
     CLEANUP_STARTED=0
     stop_service proxy || result=1
-    stop_service alltalk || result=1
     stop_service pockettts || result=1
-    stop_service silly || result=1
     stop_service llm || result=1
+    (( result == 0 )) && cleanup_kobold_runtime
     rm -f -- "${SUPERVISOR_FILE}"
     rmdir -- "${LOCK_DIR}" 2>/dev/null || true
     rmdir -- "${RUNTIME_DIR}" 2>/dev/null || true
@@ -864,9 +900,7 @@ stop_stack() {
 monitor_stack() {
     local current_proxy_state="healthy"
     local previous_proxy_state="healthy"
-    local silly_available=1
     local pockettts_available=1
-    local alltalk_available=1
 
     while true; do
         if ! service_running proxy; then
@@ -897,16 +931,6 @@ monitor_stack() {
             previous_proxy_state=${current_proxy_state}
         fi
 
-        if service_running silly; then
-            if (( ! silly_available )); then
-                log "SillyTavern is running again"
-                silly_available=1
-            fi
-        elif (( silly_available )); then
-            log "SillyTavern is no longer running; keeping the proxy running"
-            silly_available=0
-        fi
-
         if ! service_running pockettts && ! pockettts_ready; then
             if (( pockettts_available )); then
                 log "PocketTTS bridge is no longer running or ready; keeping the proxy running"
@@ -917,15 +941,6 @@ monitor_stack() {
             pockettts_available=1
         fi
 
-        if ! service_running alltalk && ! alltalk_ready; then
-            if (( alltalk_available )); then
-                log "AllTalk is no longer running or ready; keeping the proxy running"
-                alltalk_available=0
-            fi
-        elif (( ! alltalk_available )); then
-            log "AllTalk is running or ready again"
-            alltalk_available=1
-        fi
         sleep 1
     done
 }
@@ -983,14 +998,20 @@ main() {
     fi
 
     ensure_service_started llm || return 1
-    ensure_service_started silly || return 1
     ensure_service_started pockettts || return 1
     log "waiting for PocketTTS bridge readiness at http://127.0.0.1:${POCKETTTS_PORT}/health"
     wait_for_pockettts || return 1
-    ensure_service_started alltalk || return 1
     log "waiting for ${LLM_LABEL} readiness at ${LLM_URL}"
-    log "waiting for AllTalk readiness at http://127.0.0.1:${ALLTALK_PORT}/api/ready"
     wait_for_dependencies || return 1
+
+    if (( ${#PROXY_ROUTER_ARGS} )); then
+        "${PROXY_PATH}" --check-backend --llm-backend "${LLM_BACKEND}" \
+            --llm-url "${LLM_URL}" "${PROXY_ROUTER_ARGS[@]}" \
+            --write-kobold-model-cache "${KOBOLD_MODEL_CACHE}" || {
+                log "Router mode unavailable; restart KoboldCpp with --admin, --admindir and --routermode"
+                return 1
+            }
+    fi
 
     if service_running proxy; then
         ensure_service_started proxy || return 1

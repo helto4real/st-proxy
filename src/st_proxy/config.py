@@ -69,6 +69,9 @@ class BrokerConfig:
     kobold_url: InitVar[str | None] = None
     comfy_url: str = "http://127.0.0.1:8189"
     kobold_admin_password: str | None = None
+    kobold_router_mode: bool = False
+    kobold_model_cache: str | None = None
+    max_chat_body_bytes: int = 32 * 1024**2
     connect_timeout: float = 30.0
     request_timeout: float = 3900.0
     image_timeout: float = 1800.0
@@ -90,6 +93,8 @@ class BrokerConfig:
     def __post_init__(self, kobold_url: str | None) -> None:
         if not self.llm_backend:
             raise ConfigurationError("llm_backend cannot be empty")
+        if self.kobold_router_mode and self.llm_backend != "koboldcpp":
+            raise ConfigurationError("KoboldCpp Router mode requires the koboldcpp backend")
         from .llm import backend_default_origin
 
         if kobold_url and self.llm_url:
@@ -117,6 +122,7 @@ class BrokerConfig:
             if getattr(self, name) <= 0:
                 raise ConfigurationError(f"{name} must be greater than zero")
         for name in (
+            "max_chat_body_bytes",
             "comfy_poll_failure_limit",
             "max_workflow_body_bytes",
             "max_queued_images",

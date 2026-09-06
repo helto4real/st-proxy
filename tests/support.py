@@ -150,11 +150,13 @@ class MockComfy:
     websocket_origins: list[str | None] = field(default_factory=list)
     userdata_requests: list[str] = field(default_factory=list)
     generic_requests: list[tuple[str, str]] = field(default_factory=list)
+    history_deletes: list[list[str]] = field(default_factory=list)
 
     def app(self) -> web.Application:
         app = web.Application()
         app.router.add_post("/prompt", self.prompt)
         app.router.add_get("/history/{prompt_id}", self.history)
+        app.router.add_post("/history", self.delete_history)
         app.router.add_post("/free", self.free)
         app.router.add_post("/interrupt", self.interrupt)
         app.router.add_get("/ws", self.websocket)
@@ -196,6 +198,11 @@ class MockComfy:
                 }
             }
         )
+
+    async def delete_history(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        self.history_deletes.append(list(payload.get("delete", [])))
+        return web.json_response({})
 
     async def free(self, request: web.Request) -> web.Response:
         assert await request.json() == {"unload_models": True, "free_memory": True}

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
 from collections.abc import Sequence
 from dataclasses import replace
+from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 
@@ -17,6 +19,7 @@ from .llm import (
     backend_default_origin,
     build_llm_backend,
 )
+from .llm.koboldcpp import KoboldCppBackend
 from .service import BrokerService
 
 LOG = logging.getLogger(__name__)
@@ -78,6 +81,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prefer ST_PROXY_KOBOLD_ADMIN_PASSWORD to avoid shell history",
     )
     parser.add_argument("--connect-timeout", type=float, default=_env_float("CONNECT_TIMEOUT", 30))
+    parser.add_argument("--kobold-router-mode", action="store_true",
+                        default=_env_bool("KOBOLD_ROUTER_MODE"))
+    parser.add_argument("--kobold-model-cache", default=_env("KOBOLD_MODEL_CACHE"))
+    parser.add_argument("--max-chat-body-bytes", type=int,
+                        default=_env_int("MAX_CHAT_BODY_BYTES", 32 * 1024**2))
+    parser.add_argument("--write-kobold-model-cache",
+                        help="with --check-backend, export the native router's passive model list")
     parser.add_argument(
         "--request-timeout", type=float, default=_env_float("REQUEST_TIMEOUT", 3900)
     )
@@ -163,6 +173,9 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         llm_url=llm_url,
         comfy_url=args.comfy_url,
         kobold_admin_password=args.kobold_admin_password,
+        kobold_router_mode=args.kobold_router_mode,
+        kobold_model_cache=args.kobold_model_cache,
+        max_chat_body_bytes=args.max_chat_body_bytes,
         connect_timeout=args.connect_timeout,
         request_timeout=args.request_timeout,
         image_timeout=args.image_timeout,
@@ -181,7 +194,9 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
     )
 
 
-async def check_backend(config: BrokerConfig, timeout_seconds: float) -> None:
+async def check_backend(
+    config: BrokerConfig, timeout_seconds: float, model_cache: str | None = None,
+) -> None:
     if timeout_seconds <= 0:
         raise ConfigurationError("backend_check_timeout must be greater than zero")
     check_config = replace(
@@ -206,6 +221,14 @@ async def check_backend(config: BrokerConfig, timeout_seconds: float) -> None:
         backend = build_llm_backend(session, check_config)
         await backend.validate_control()
         await backend.snapshot_ready()
+        if model_cache:
+            if not isinstance(backend, KoboldCppBackend) or not config.kobold_router_mode:
+                raise ConfigurationError("model cache export requires KoboldCpp Router mode")
+            models = await backend.router_models()
+            destination = Path(model_cache)
+            temporary = destination.with_suffix(".tmp")
+            temporary.write_text(json.dumps(models), encoding="utf-8")
+            temporary.replace(destination)
         LOG.info("LLM backend ready: backend=%s", backend.info.label)
 
 
@@ -256,8 +279,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     try:
         config = config_from_args(args)
+        if args.write_kobold_model_cache and not args.check_backend:
+            raise ConfigurationError("--write-kobold-model-cache requires --check-backend")
         if args.check_backend:
-            asyncio.run(check_backend(config, args.backend_check_timeout))
+            asyncio.run(check_backend(
+                config, args.backend_check_timeout, args.write_kobold_model_cache,
+            ))
         else:
             asyncio.run(run(config))
     except (ConfigurationError, ValueError) as exc:

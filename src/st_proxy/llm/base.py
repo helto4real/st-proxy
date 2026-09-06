@@ -45,7 +45,10 @@ class LlmBackend(Protocol[RestorePointT]):
         """Return only after the backend has confirmed that its GPU resources are released."""
 
     async def acquire_gpu(self, target: RestorePointT | None) -> RestorePointT:
-        """Restore target, or the configured default, and return the confirmed state."""
+        """Restore target/default, or reserve for native per-request model loading.
+
+        The coordinator must distinguish a router reservation from model readiness.
+        """
 
 
 def backend_error(label: str, action: str, detail: str | None = None) -> UpstreamError:

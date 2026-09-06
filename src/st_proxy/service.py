@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any
@@ -13,7 +14,9 @@ from .config import BrokerConfig
 from .coordinator import HandoffCoordinator
 from .errors import BrokerError, ChatUnavailable, HandoffError, QueueFull
 from .http import BufferedResponse, proxy_stream, proxy_websocket, upstream_request_headers
+from .kobold_router import ABORT_PATH, TEXT_PATHS, default_model_body, read_model_cache
 from .llm import LlmBackend, build_llm_backend
+from .llm.koboldcpp import KoboldCppBackend
 
 LOG = logging.getLogger(__name__)
 STATUS_PATH = "/broker/status"
@@ -48,6 +51,18 @@ def _inactive_llm_metadata(path: str) -> web.Response:
     if path == "/v1/models":
         return web.json_response({"object": "list", "data": []})
     return web.json_response({"result": "inactive"})
+
+
+def _history_delete_prompt_ids(body: bytes) -> frozenset[str]:
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return frozenset()
+    if not isinstance(payload, dict) or not isinstance(payload.get("delete"), list):
+        return frozenset()
+    return frozenset(
+        value for value in payload["delete"] if isinstance(value, str) and value
+    )
 
 
 def _bound_port(site: web.TCPSite) -> int:
@@ -86,6 +101,9 @@ class BrokerService:
         self._active_chat_requests = 0
         self._active_image_requests = 0
         self._active_websockets = 0
+        self._router_models = (
+            read_model_cache(config.kobold_model_cache) if config.kobold_router_mode else None
+        )
 
     def _new_session(
         self,
@@ -253,7 +271,9 @@ class BrokerService:
             request.path,
         )
         try:
-            if _is_passive_llm_metadata(request, self.llm.info.kind):
+            if self.config.kobold_router_mode:
+                response = await self._router_handler(request)
+            elif _is_passive_llm_metadata(request, self.llm.info.kind):
                 LOG.debug(
                     "passive LLM metadata request bypasses GPU lease: path=%s",
                     request.path,
@@ -308,6 +328,96 @@ class BrokerService:
                 {"error": f"{label} upstream request failed"},
                 status=502,
             )
+
+    async def _router_body(self, request: web.Request) -> bytes:
+        try:
+            async with asyncio.timeout(self.config.request_timeout):
+                return await _read_workflow_body(request, self.config.max_chat_body_bytes)
+        except WorkflowBodyTooLarge:
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=self.config.max_chat_body_bytes,
+                actual_size=request.content_length or self.config.max_chat_body_bytes + 1,
+            ) from None
+
+    async def _router_handler(self, request: web.Request) -> web.StreamResponse:
+        assert self.coordinator is not None and self.chat_session is not None
+        assert isinstance(self.llm, KoboldCppBackend)
+        path = request.path.rstrip("/")
+        if request.method == "GET" and path in {"/v1/models", "/api/v1/model"}:
+            async with self.coordinator.passive_llm_metadata() as available:
+                if path == "/v1/models":
+                    if available:
+                        try:
+                            self._router_models = await self.llm.router_models()
+                        except BrokerError:
+                            LOG.warning("router model discovery failed; retaining cached list")
+                    return web.json_response(self._router_models)
+                if not available:
+                    return _inactive_llm_metadata(path)
+                return await proxy_stream(request, self.chat_session, self.llm.info.chat_origin)
+        if path.startswith("/api/admin/reload_config") or path == "/noscript":
+            raise web.HTTPForbidden(text="model lifecycle is owned by the broker")
+        abort = request.method == "POST" and path == ABORT_PATH
+        if request.method in {"GET", "HEAD", "OPTIONS"} or abort:
+            async with self.coordinator.router_control(abort=abort) as available:
+                if not available:
+                    raise ChatUnavailable("router control is unavailable during GPU transition")
+                body = await self._router_body(request) if request.can_read_body else b""
+                return await proxy_stream(
+                    request, self.chat_session, self.llm.info.chat_origin, body=body,
+                )
+        if request.content_length is not None:
+            if request.content_length > self.config.max_chat_body_bytes:
+                raise web.HTTPRequestEntityTooLarge(
+                    max_size=self.config.max_chat_body_bytes, actual_size=request.content_length,
+                )
+        acquired = asyncio.Event()
+        task = asyncio.create_task(self._router_chat(request, acquired))
+        try:
+            while not task.done() and not acquired.is_set():
+                if request.transport is None or request.transport.is_closing():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    return web.Response(status=499)
+                await asyncio.wait({task}, timeout=0.05)
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def _router_chat(
+        self, request: web.Request, acquired: asyncio.Event,
+    ) -> web.StreamResponse:
+        assert self.coordinator is not None and self.chat_session is not None
+        assert self.llm is not None
+        async with self.coordinator.chat_lease():
+            acquired.set()
+            if request.transport is None or request.transport.is_closing():
+                return web.Response(status=499)
+            body = await self._router_body(request)
+            path = request.path.rstrip("/")
+            if request.method == "POST" and path in TEXT_PATHS:
+                try:
+                    body = default_model_body(body)
+                except (ValueError, UnicodeError):
+                    raise web.HTTPBadRequest(text="expected a JSON object") from None
+                path = TEXT_PATHS[path]
+            if len(body) > self.config.max_chat_body_bytes:
+                raise web.HTTPRequestEntityTooLarge(
+                    max_size=self.config.max_chat_body_bytes, actual_size=len(body),
+                )
+            try:
+                response = await proxy_stream(
+                    request, self.chat_session, self.llm.info.chat_origin,
+                    raw_path=path, body=body,
+                )
+                if response.status >= 500:
+                    await self.coordinator.router_request_failed()
+                return response
+            except BaseException:
+                await self.coordinator.router_request_failed()
+                raise
 
     async def _image_handler(self, request: web.Request) -> web.StreamResponse:
         assert (
@@ -432,6 +542,12 @@ class BrokerService:
                 return web.json_response({"error": str(exc)}, status=503)
         try:
             is_websocket = request.headers.get("Upgrade", "").lower() == "websocket"
+            buffered_body: bytes | None = None
+            if request.method == "POST" and request.path == "/history":
+                buffered_body = await request.read()
+                prompt_ids = _history_delete_prompt_ids(buffered_body)
+                if prompt_ids:
+                    await self.coordinator.wait_before_history_delete(prompt_ids)
             if is_websocket:
                 response = await proxy_websocket(
                     request,
@@ -452,6 +568,7 @@ class BrokerService:
                     self.image_session,
                     self.config.comfy_url,
                     raw_path=upstream_raw_path,
+                    body=buffered_body,
                 )
             request_log(
                 "request completed: target=ComfyUI method=%s path=%s status=%s duration=%.3fs",

@@ -10,6 +10,7 @@ from aiohttp import ClientError, ClientSession
 
 from ..errors import UpstreamError
 from ..http import child_url
+from ..kobold_router import model_list
 from .base import BackendInfo, BackendTimeouts, RestorePoint, backend_error
 
 LOG = logging.getLogger(__name__)
@@ -31,10 +32,12 @@ class KoboldCppBackend:
         origin: str,
         admin_password: str | None,
         timeouts: BackendTimeouts,
+        router_mode: bool = False,
     ) -> None:
         self._session = session
         self._admin_password = admin_password
         self._timeouts = timeouts
+        self.router_mode = router_mode
         self._info = BackendInfo("koboldcpp", "KoboldCpp", origin)
 
     @property
@@ -158,6 +161,13 @@ class KoboldCppBackend:
                         )
                     capabilities = await response.json(content_type=None)
                 admin_level = capabilities.get("admin") if isinstance(capabilities, dict) else None
+                if self.router_mode and (
+                    not isinstance(capabilities, dict) or capabilities.get("router") is not True
+                ):
+                    raise backend_error(
+                        self.info.label, "router readiness check",
+                        "restart KoboldCpp with --admin, --admindir and --routermode",
+                    )
                 if not isinstance(admin_level, int) or admin_level < 1:
                     raise backend_error(
                         self.info.label,
@@ -244,11 +254,28 @@ class KoboldCppBackend:
         await self._reload_config("unload_model", self._timeouts.release)
         await self._wait_for_model(loaded=False, timeout_seconds=self._timeouts.release)
 
+    async def router_models(self) -> dict:
+        try:
+            async with self._session.get(
+                child_url(self.info.chat_origin, "/v1/models")
+            ) as response:
+                if response.status >= 400:
+                    raise ValueError("model list unavailable")
+                return model_list(await response.json(content_type=None))
+        except (ClientError, TimeoutError, ValueError) as exc:
+            raise backend_error(self.info.label, "router model discovery") from exc
+
     async def acquire_gpu(
         self,
         target: RestorePoint | None,
     ) -> KoboldCppRestorePoint:
         restore = self._require_target(target) if target is not None else None
+        if self.router_mode:
+            # This is a reservation, not a claim that a model is loaded. The
+            # native router will load the request's model inside the lease.
+            if not await self._version_ready():
+                raise backend_error(self.info.label, "router readiness", "unavailable")
+            return KoboldCppRestorePoint("")
         await self._reload_config("initial_model", self._timeouts.acquire)
         model = await self._wait_for_model(
             loaded=True,

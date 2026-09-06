@@ -675,7 +675,7 @@ that route to the GPU-sensitive policy before using it alongside the LLM.
 
 The repository includes `st-stack.zsh`, a Linux/Zsh supervisor tailored to the
 repository owner's local multi-service setup. It can supervise a configured
-LLM, SillyTavern, PocketTTS, AllTalk, and the proxy. It does not start ComfyUI.
+LLM, PocketTTS, and the proxy. It does not manage SillyTavern, AllTalk, or ComfyUI.
 
 This script is not a portable default installation:
 
@@ -711,6 +711,24 @@ export ST_STACK_KOBOLD_CONFIG='roleplay/gemma4/role-play-no-thinking-goetia-26b'
 `./koboldcpp-linux-x64`. Setting `ST_STACK_LLM_COMMAND` preserves the generic
 custom-command behavior and takes precedence over automatic KoboldCpp config
 selection.
+
+The standard KoboldCpp launch now enables native Router mode. The selection at
+startup remains the default profile, while all discovered `.kcpps` files become
+available through the proxy's `/v1/models`. Choose one of those exact IDs in your
+client; KoboldCpp performs the model switch inside the proxy's GPU lease.
+One model-dependent request runs at a time, and ComfyUI waits for its complete
+response and confirmed model unload. The model list remains available from
+cache while ComfyUI works.
+
+Temporary admin links preserve deep directory layouts without changing the
+source profiles. Their names contain a stable suffix to distinguish identical
+filenames in different directories. Restart the stack after adding profiles.
+An already running KoboldCpp must be restarted with Router mode enabled before
+the new stack mode can use it. Set `ST_PROXY_KOBOLD_ROUTER_MODE=false` to keep
+the previous single-profile behavior. Custom `ST_STACK_LLM_COMMAND` launches
+remain in that mode unless Router mode is explicitly enabled and configured in
+the custom command. See [native Router mode](../README.md#koboldcpp-native-router-mode)
+for standalone setup, transport limits and supported requests.
 
 Show child-process output:
 

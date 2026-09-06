@@ -26,6 +26,18 @@ def test_default_cli_uses_koboldcpp_compatibility_defaults() -> None:
     assert config.max_queued_images == 32
     assert config.max_queued_workflow_bytes == 256 * 1024**2
     assert config.allow_unknown_comfy_routes
+    assert not config.kobold_router_mode
+    assert config.max_chat_body_bytes == 32 * 1024**2
+
+
+def test_router_options_and_environment_map_to_config() -> None:
+    config = _parse("--kobold-router-mode", "--kobold-model-cache", "/tmp/models.json",
+                    "--max-chat-body-bytes", "4096")
+    assert config.kobold_router_mode
+    assert config.kobold_model_cache == "/tmp/models.json"
+    assert config.max_chat_body_bytes == 4096
+    with patch.dict(os.environ, {"ST_PROXY_KOBOLD_ROUTER_MODE": "true"}, clear=True):
+        assert config_from_args(build_parser().parse_args(())).kobold_router_mode
 
 
 def test_ollama_cli_uses_backend_specific_default_origin() -> None:

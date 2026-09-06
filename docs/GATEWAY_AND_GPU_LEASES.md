@@ -114,6 +114,33 @@ request body is released immediately after the upstream response.
 
 ## Failure boundary
 
+### Native KoboldCpp routing
+
+With `--kobold-router-mode`, the FIFO serializes model-dependent requests through
+their complete upstream responses. The broker first confirms ComfyUI cleanup,
+then enters `llm_reserved` and forwards the request to KoboldCpp's native router.
+The reservation is GPU permission, independent of model readiness. The native
+router selects and loads the requested profile; no broker-selected restore
+target or intermediate `initial_model` load is used. Before granting ComfyUI,
+the broker always confirms an explicit unload, even after an uncertain router
+response. A failed unload cannot be treated as available GPU memory.
+
+Abort bypasses the model-dependent FIFO while a request is active, but holds a
+short control reference that must drain before a handoff. Passive model discovery
+returns a sanitized cached catalog during ComfyUI work or LLM requests. Generic
+read-only metadata does not acquire GPU ownership. Router reservations exclude
+new metadata operations during transitions, and the next generation waits for
+existing metadata operations to finish. Startup still performs no broker-driven
+backend loading; the stack's explicit readiness check seeds the cache.
+
+The router accepts length-delimited request bodies, so the broker buffers only
+the admitted request with a separate byte limit, supplies `Content-Length`, and
+preserves the existing streaming response relay. Waiting disconnected clients
+are removed; already-started upstream responses continue to drain. Direct
+backend access is still outside the enforceable lease boundary.
+
+### Ownership failures
+
 Ownership is `unknown` during transitions where the current owner is no longer
 confirmed. The coordinator never grants
 the destination backend before the source release succeeds. In particular, a

@@ -152,12 +152,13 @@ async def proxy_stream(
     origin: str,
     *,
     raw_path: str | None = None,
+    body: bytes | None = None,
 ) -> web.StreamResponse:
     async with session.request(
         request.method,
         upstream_url(origin, request, raw_path=raw_path),
         headers=upstream_request_headers(request, origin),
-        data=request_body(request),
+        data=request_body(request) if body is None else body,
         allow_redirects=False,
     ) as upstream:
         downstream = web.StreamResponse(

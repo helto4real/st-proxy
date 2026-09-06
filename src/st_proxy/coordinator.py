@@ -24,6 +24,7 @@ class HandoffState(StrEnum):
     AWAITING_REQUEST = "awaiting_request"
     VERIFYING_LLM = "verifying_llm"
     LLM_READY = "llm_ready"
+    LLM_RESERVED = "llm_reserved"
     DRAINING_LLM = "draining_llm"
     UNLOADING_LLM = "unloading_llm"
     COMFY_READY = "comfy_ready"
@@ -92,6 +93,7 @@ class HandoffCoordinator:
         self._fatal_error: str | None = None
         self._last_error: str | None = None
         self._active_prompt_id: str | None = None
+        self._active_prompt_terminal: asyncio.Event | None = None
         self._owner = GpuOwner.UNKNOWN
         self._state = HandoffState.INITIALIZING
         self._state_changed_at = time.monotonic()
@@ -159,6 +161,7 @@ class HandoffCoordinator:
             "last_error": self._last_error,
             "chat_available": not self._fatal_error and not self._closing,
             "llm_backend": self._llm.info.kind,
+            "kobold_router_mode": self._config.kobold_router_mode,
             "idle_timeout": self._config.idle_timeout,
             "idle_restore_enabled": False,
             "idle_restore_scheduled": False,
@@ -290,7 +293,8 @@ class HandoffCoordinator:
                 and not self._fatal_error
                 and not self._recoverable_error
                 and self._owner is GpuOwner.LLM
-                and self._state is HandoffState.LLM_READY
+                and self._state in {HandoffState.LLM_READY, HandoffState.LLM_RESERVED}
+                and (not self._config.kobold_router_mode or not self._active_chats)
             ):
                 self._active_llm_metadata += 1
                 granted = True
@@ -392,6 +396,40 @@ class HandoffCoordinator:
                 )
                 self._condition.notify_all()
 
+    @contextlib.asynccontextmanager
+    async def router_control(self, *, abort: bool = False) -> AsyncIterator[bool]:
+        """Read-only metadata or abort: never acquire GPU resources or load a model."""
+        async with self._condition:
+            allowed = not self._closing and (
+                (abort and self._active_chats > 0)
+                or (not abort and not self._active_chats and self._state in {
+                    HandoffState.AWAITING_REQUEST, HandoffState.LLM_RESERVED,
+                    HandoffState.LLM_READY, HandoffState.COMFY_READY,
+                    HandoffState.IMAGE_ACTIVE,
+                })
+            )
+            if allowed:
+                self._active_llm_metadata += 1
+        try:
+            yield allowed
+        finally:
+            if allowed:
+                async with self._condition:
+                    self._active_llm_metadata -= 1
+                    self._condition.notify_all()
+
+    async def router_request_failed(self) -> None:
+        # A failed HTTP request is not proof that the router stopped loading or
+        # generating. Keep the reservation until an explicit unload is verified.
+        await self._mark_recoverable("KoboldCpp router request did not complete reliably")
+
+    async def wait_before_history_delete(self, prompt_ids: frozenset[str]) -> None:
+        active_prompt_id = self._active_prompt_id
+        terminal = self._active_prompt_terminal
+        if active_prompt_id is None or active_prompt_id not in prompt_ids or terminal is None:
+            return
+        await terminal.wait()
+
     async def _next_work(self) -> DispatchItem | None:
         async with self._condition:
             while not self._queue and not self._closing and not self._fatal_error:
@@ -430,8 +468,17 @@ class HandoffCoordinator:
     async def _dispatch_chat(self, work: ChatWork) -> None:
         if work.cancelled:
             return
+        if self._config.kobold_router_mode:
+            async with self._condition:
+                while self._active_chats or self._active_llm_metadata:
+                    await self._condition.wait()
+                    if work.cancelled or self._closing:
+                        return
+                # Stop new metadata leases before releasing the condition and
+                # preparing the GPU reservation.
+                self._set_state(HandoffState.DRAINING_LLM)
         errors: list[str] = []
-        if self._owner is not GpuOwner.LLM:
+        if self._owner is not GpuOwner.LLM or self._recoverable_error:
             restored = await self._restore_llm(errors)
             self._record_errors(errors)
             if not restored:
@@ -454,6 +501,8 @@ class HandoffCoordinator:
                 return
             work.granted = True
             self._active_chats += 1
+            if self._config.kobold_router_mode:
+                self._set_state(HandoffState.LLM_RESERVED)
             LOG.debug(
                 "chat lease granted: sequence=%s active_chats=%s",
                 work.sequence,
@@ -494,6 +543,7 @@ class HandoffCoordinator:
             if not result.prompt_id:
                 raise HandoffError("ComfyUI response did not contain a prompt_id")
             self._active_prompt_id = result.prompt_id
+            self._active_prompt_terminal = asyncio.Event()
             LOG.info("ComfyUI image job started: prompt_id=%s", result.prompt_id)
             await self._comfy.wait_for_prompt(result.prompt_id)
             LOG.info("ComfyUI image job completed: prompt_id=%s", result.prompt_id)
@@ -519,6 +569,9 @@ class HandoffCoordinator:
                 )
             self._resolve_image_error(work, error)
         finally:
+            if self._active_prompt_terminal is not None:
+                self._active_prompt_terminal.set()
+            self._active_prompt_terminal = None
             self._active_prompt_id = None
             self._record_errors(errors)
 
@@ -553,6 +606,18 @@ class HandoffCoordinator:
                 return False
             LOG.info("LLM requests drained")
 
+        if self._config.kobold_router_mode and self._owner is not GpuOwner.COMFY:
+            await self._ensure_control_validated()
+            if self._restore_point is None:
+                self._restore_point = await self._llm.acquire_gpu(None)
+            self._owner = GpuOwner.UNKNOWN
+            self._set_state(HandoffState.UNLOADING_LLM)
+            await self._llm.release_gpu(self._restore_point)
+            self._owner = GpuOwner.COMFY
+            self._recoverable_error = None
+            self._set_state(HandoffState.COMFY_READY)
+            return True
+
         if self._llm.info.kind == "koboldcpp" and self._owner is GpuOwner.UNKNOWN:
             await self._ensure_control_validated()
             observed = await self._llm.observe_ready()
@@ -579,7 +644,7 @@ class HandoffCoordinator:
         self._control_validated = True
 
     async def _restore_llm(self, errors: list[str]) -> bool:
-        if self._owner is GpuOwner.LLM:
+        if self._owner is GpuOwner.LLM and not self._recoverable_error:
             return True
 
         self._recovering = True
@@ -615,7 +680,12 @@ class HandoffCoordinator:
         self._owner = GpuOwner.UNKNOWN
         try:
             await self._ensure_control_validated()
-            if self._restore_point is None and self._llm.info.kind == "koboldcpp":
+            if self._config.kobold_router_mode:
+                if self._recoverable_error and self._restore_point is not None:
+                    await self._llm.release_gpu(self._restore_point)
+                self._restore_point = await self._llm.acquire_gpu(None)
+                self._owner = GpuOwner.LLM
+            elif self._restore_point is None and self._llm.info.kind == "koboldcpp":
                 observed = await self._llm.observe_ready()
                 if observed is not None:
                     self._restore_point = observed
@@ -640,7 +710,10 @@ class HandoffCoordinator:
             self._fatal_error = None
             self._recoverable_error = None
             self._last_error = None
-            self._set_state(HandoffState.LLM_READY)
+            self._set_state(
+                HandoffState.LLM_RESERVED if self._config.kobold_router_mode
+                else HandoffState.LLM_READY
+            )
             LOG.info(
                 "GPU ownership transferred: owner=%s",
                 self._llm.info.label,

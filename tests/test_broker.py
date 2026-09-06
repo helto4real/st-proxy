@@ -103,6 +103,52 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.comfy.free_calls, 1)
         self.assertEqual((await self.status())["state"], "llm_ready")
 
+    async def test_active_prompt_history_delete_waits_for_terminal_observation(self) -> None:
+        self.comfy.auto_complete = False
+        response = await self.post_prompt()
+        response.close()
+        await wait_until(
+            lambda: self.service.coordinator.status()["state"] == "image_active"
+        )
+
+        async with self.client.post(
+            f"{self.image_url}/history",
+            json={"delete": ["another-prompt"]},
+        ) as unrelated:
+            self.assertEqual(unrelated.status, 200)
+        self.assertEqual(self.comfy.history_deletes, [["another-prompt"]])
+
+        deletion = asyncio.create_task(
+            self.client.post(
+                f"{self.image_url}/history",
+                json={"delete": ["synthetic-1"]},
+            )
+        )
+        await asyncio.sleep(0.05)
+        self.assertFalse(deletion.done())
+        self.assertEqual(self.comfy.history_deletes, [["another-prompt"]])
+
+        chat = asyncio.create_task(
+            self.client.post(f"{self.chat_url}/api/extra/tokencount", json={})
+        )
+        await wait_until(
+            lambda: self.service.coordinator.status()["waiting_chats"] == 1
+        )
+        self.comfy.completion["synthetic-1"].set()
+
+        delete_response = await deletion
+        async with delete_response:
+            self.assertEqual(delete_response.status, 200)
+        chat_response = await chat
+        async with chat_response:
+            self.assertEqual(chat_response.status, 200)
+        await self.wait_ready()
+        self.assertEqual(
+            self.comfy.history_deletes,
+            [["another-prompt"], ["synthetic-1"]],
+        )
+        self.assertEqual((await self.status())["waiting_chats"], 0)
+
     async def test_kobold_metadata_queries_are_passive_while_comfy_owns_gpu(self) -> None:
         self.comfy.auto_complete = False
         response = await self.post_prompt()

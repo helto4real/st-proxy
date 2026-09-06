@@ -40,6 +40,7 @@ def _build_koboldcpp(
         session,
         origin=config.llm_url,
         admin_password=config.kobold_admin_password,
+        router_mode=config.kobold_router_mode,
         timeouts=_timeouts(config),
     )
 
