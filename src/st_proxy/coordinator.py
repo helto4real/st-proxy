@@ -171,9 +171,9 @@ class HandoffCoordinator:
         }
 
     async def initialize(self) -> bool:
-        """Start coordination without activating KoboldCpp in the background."""
+        """Start coordination without activating request-driven backends in the background."""
         LOG.info("broker initialization started")
-        if self._llm.info.kind == "koboldcpp":
+        if self._llm.info.kind in {"koboldcpp", "tabbyapi"}:
             async with self._condition:
                 self._owner = GpuOwner.UNKNOWN
                 self._set_state(HandoffState.AWAITING_REQUEST)
@@ -618,7 +618,7 @@ class HandoffCoordinator:
             self._set_state(HandoffState.COMFY_READY)
             return True
 
-        if self._llm.info.kind == "koboldcpp" and self._owner is GpuOwner.UNKNOWN:
+        if self._llm.info.kind in {"koboldcpp", "tabbyapi"} and self._owner is GpuOwner.UNKNOWN:
             await self._ensure_control_validated()
             observed = await self._llm.observe_ready()
             if observed is not None:
@@ -685,7 +685,7 @@ class HandoffCoordinator:
                     await self._llm.release_gpu(self._restore_point)
                 self._restore_point = await self._llm.acquire_gpu(None)
                 self._owner = GpuOwner.LLM
-            elif self._restore_point is None and self._llm.info.kind == "koboldcpp":
+            elif self._restore_point is None and self._llm.info.kind in {"koboldcpp", "tabbyapi"}:
                 observed = await self._llm.observe_ready()
                 if observed is not None:
                     self._restore_point = observed

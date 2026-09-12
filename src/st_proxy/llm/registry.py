@@ -10,6 +10,7 @@ from ..errors import ConfigurationError
 from .base import BackendTimeouts, LlmBackend
 from .koboldcpp import KoboldCppBackend
 from .ollama import OllamaBackend
+from .tabbyapi import TabbyApiBackend
 
 if TYPE_CHECKING:
     from ..config import BrokerConfig
@@ -53,6 +54,16 @@ def _build_ollama(session: ClientSession, config: BrokerConfig) -> OllamaBackend
     )
 
 
+def _build_tabbyapi(session: ClientSession, config: BrokerConfig) -> TabbyApiBackend:
+    return TabbyApiBackend(
+        session,
+        origin=config.llm_url,
+        model=config.tabby_model,
+        max_seq_len=config.tabby_max_seq_len,
+        timeouts=_timeouts(config),
+    )
+
+
 _BACKENDS = {
     "koboldcpp": BackendSpec(
         "koboldcpp",
@@ -65,6 +76,9 @@ _BACKENDS = {
         "Ollama",
         "http://127.0.0.1:11434",
         _build_ollama,
+    ),
+    "tabbyapi": BackendSpec(
+        "tabbyapi", "TabbyAPI", "http://127.0.0.1:5003", _build_tabbyapi,
     ),
 }
 

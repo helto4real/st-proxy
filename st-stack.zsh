@@ -16,56 +16,71 @@ typeset -gr PROXY_COMMAND="./.venv/bin/st-vram-proxy"
 typeset -gr PROXY_PATH="${SCRIPT_DIR}/.venv/bin/st-vram-proxy"
 typeset -gr COMFY_URL="${ST_PROXY_COMFY_URL:-http://127.0.0.1:8188}"
 
-typeset -gi LLM_COMMAND_EXPLICIT=${+ST_STACK_LLM_COMMAND}
-typeset -g KOBOLD_EXECUTABLE="${ST_STACK_KOBOLD_EXECUTABLE:-./koboldcpp-linux-x64}"
 typeset -g LLM_BACKEND="${ST_PROXY_LLM_BACKEND:-koboldcpp}"
-typeset -g LLM_LABEL=""
-typeset -g LLM_DEFAULT_URL=""
-typeset -g LLM_DEFAULT_DIR=""
-typeset -g LLM_DEFAULT_COMMAND=""
-case "${LLM_BACKEND}" in
-    koboldcpp)
-        LLM_LABEL="KoboldCpp"
-        LLM_DEFAULT_URL="http://127.0.0.1:5001"
-        LLM_DEFAULT_DIR="${HOME}/git/cobolcpp"
-        LLM_DEFAULT_COMMAND="${KOBOLD_EXECUTABLE}"
-        ;;
-    ollama)
-        LLM_LABEL="Ollama"
-        LLM_DEFAULT_URL="http://127.0.0.1:11434"
-        LLM_DEFAULT_DIR="${HOME}"
-        LLM_DEFAULT_COMMAND="ollama serve"
-        ;;
-    *)
-        LLM_LABEL="${LLM_BACKEND}"
-        ;;
-esac
-typeset -g LLM_URL="${ST_PROXY_LLM_URL:-${ST_PROXY_KOBOLD_URL:-${LLM_DEFAULT_URL}}}"
-typeset -g LLM_DIR="${ST_STACK_LLM_DIR:-${LLM_DEFAULT_DIR}}"
-typeset -g LLM_COMMAND_TEXT="${ST_STACK_LLM_COMMAND:-${LLM_DEFAULT_COMMAND}}"
-typeset -ga LLM_COMMAND=(${(z)LLM_COMMAND_TEXT})
-typeset -g LLM_COMMAND_NAME=""
-if (( ${#LLM_COMMAND} )); then
-    LLM_COMMAND_NAME=${LLM_COMMAND[1]:t:l}
-fi
-typeset -g KOBOLD_CONFIG_DIR="${ST_STACK_KOBOLD_CONFIG_DIR:-${LLM_DIR}/models}"
-typeset -g KOBOLD_CONFIG_SETTING="${ST_STACK_KOBOLD_CONFIG:-}"
-typeset -g KOBOLD_SELECTED_CONFIG=""
-typeset -ga KOBOLD_CONFIG_FILES=()
-typeset -g KOBOLD_ROUTER_MODE="${ST_PROXY_KOBOLD_ROUTER_MODE:-}"
-if [[ -z "${KOBOLD_ROUTER_MODE}" ]]; then
-    KOBOLD_ROUTER_MODE=false
-    if [[ "${LLM_BACKEND}" == koboldcpp ]] && (( ! LLM_COMMAND_EXPLICIT )); then
-        KOBOLD_ROUTER_MODE=true
+
+configure_llm_backend() {
+    typeset -gi LLM_COMMAND_EXPLICIT=${+ST_STACK_LLM_COMMAND}
+    typeset -g KOBOLD_EXECUTABLE="${ST_STACK_KOBOLD_EXECUTABLE:-./koboldcpp-linux-x64}"
+    typeset -g LLM_LABEL=""
+    typeset -g LLM_DEFAULT_URL=""
+    typeset -g LLM_DEFAULT_DIR=""
+    typeset -g LLM_DEFAULT_COMMAND=""
+    case "${LLM_BACKEND}" in
+        koboldcpp)
+            LLM_LABEL="KoboldCpp"
+            LLM_DEFAULT_URL="http://127.0.0.1:5001"
+            LLM_DEFAULT_DIR="${HOME}/git/cobolcpp"
+            LLM_DEFAULT_COMMAND="${KOBOLD_EXECUTABLE}"
+            ;;
+        tabbyapi)
+            LLM_LABEL="TabbyAPI"
+            LLM_DEFAULT_URL="http://127.0.0.1:5003"
+            LLM_DEFAULT_DIR="${HOME}/git/tabby"
+            LLM_DEFAULT_COMMAND="./start.sh"
+            # Do not inherit a KoboldCpp-only mode into the selected adapter.
+            export ST_PROXY_KOBOLD_ROUTER_MODE=false
+            ;;
+        ollama)
+            LLM_LABEL="Ollama"
+            LLM_DEFAULT_URL="http://127.0.0.1:11434"
+            LLM_DEFAULT_DIR="${HOME}"
+            LLM_DEFAULT_COMMAND="ollama serve"
+            ;;
+        *)
+            LLM_LABEL="${LLM_BACKEND}"
+            ;;
+    esac
+    typeset -g LLM_URL="${ST_PROXY_LLM_URL:-${LLM_DEFAULT_URL}}"
+    if [[ "${LLM_BACKEND}" != tabbyapi ]]; then
+        LLM_URL="${ST_PROXY_LLM_URL:-${ST_PROXY_KOBOLD_URL:-${LLM_DEFAULT_URL}}}"
     fi
-fi
-typeset -ga PROXY_ROUTER_ARGS=()
-case "${KOBOLD_ROUTER_MODE:l}" in
-    1|true|yes|on) PROXY_ROUTER_ARGS=(--kobold-router-mode) ;;
-    0|false|no|off) ;;
-    *) print -ru2 -- "ST_PROXY_KOBOLD_ROUTER_MODE must be a boolean"; exit 2 ;;
-esac
-typeset -g KOBOLD_ADMIN_DIR=""
+    typeset -g LLM_DIR="${ST_STACK_LLM_DIR:-${LLM_DEFAULT_DIR}}"
+    typeset -g LLM_COMMAND_TEXT="${ST_STACK_LLM_COMMAND:-${LLM_DEFAULT_COMMAND}}"
+    typeset -ga LLM_COMMAND=(${(z)LLM_COMMAND_TEXT})
+    typeset -g LLM_COMMAND_NAME=""
+    if (( ${#LLM_COMMAND} )); then
+        LLM_COMMAND_NAME=${LLM_COMMAND[1]:t:l}
+    fi
+    typeset -g KOBOLD_CONFIG_DIR="${ST_STACK_KOBOLD_CONFIG_DIR:-${LLM_DIR}/models}"
+    typeset -g KOBOLD_CONFIG_SETTING="${ST_STACK_KOBOLD_CONFIG:-}"
+    typeset -g KOBOLD_SELECTED_CONFIG=""
+    typeset -ga KOBOLD_CONFIG_FILES=()
+    typeset -g KOBOLD_ROUTER_MODE="${ST_PROXY_KOBOLD_ROUTER_MODE:-}"
+    if [[ -z "${KOBOLD_ROUTER_MODE}" ]]; then
+        KOBOLD_ROUTER_MODE=false
+        if [[ "${LLM_BACKEND}" == koboldcpp ]] && (( ! LLM_COMMAND_EXPLICIT )); then
+            KOBOLD_ROUTER_MODE=true
+        fi
+    fi
+    typeset -ga PROXY_ROUTER_ARGS=()
+    case "${KOBOLD_ROUTER_MODE:l}" in
+        1|true|yes|on) PROXY_ROUTER_ARGS=(--kobold-router-mode) ;;
+        0|false|no|off) ;;
+        *) print -ru2 -- "ST_PROXY_KOBOLD_ROUTER_MODE must be a boolean"; exit 2 ;;
+    esac
+    typeset -g KOBOLD_ADMIN_DIR=""
+
+}
 
 typeset -gr RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 typeset -gr RUNTIME_DIR="${RUNTIME_BASE}/st-stack-${UID}"
@@ -146,6 +161,8 @@ parse_args() {
         log "ST_STACK_POCKETTTS_PORT must be an integer between 1 and 65535"
         return 2
     fi
+    configure_llm_backend
+
     if [[ -z "${LLM_BACKEND}" || -z "${LLM_URL}" || -z "${LLM_DIR}" || -z "${LLM_COMMAND_NAME}" ]]; then
         log "LLM backend, URL, directory and command must be configured"
         return 2
@@ -812,7 +829,10 @@ cleanup() {
     stop_service pockettts || result=1
     stop_service llm || result=1
 
-    (( result == 0 )) && cleanup_kobold_runtime
+    if (( result == 0 )); then
+        cleanup_kobold_runtime
+        rm -f -- "${RUNTIME_DIR}/llm-backend"
+    fi
 
     if (( OWNS_LOCK )); then
         rm -f -- "${SUPERVISOR_FILE}"
@@ -981,6 +1001,22 @@ TRAPEXIT() {
 main() {
     local lock_status
 
+    if (( ${@[(Ie)--stop]} )); then
+        if [[ -z "${ST_PROXY_LLM_BACKEND:-}" && -r "${RUNTIME_DIR}/llm-backend" ]]; then
+            IFS= read -r LLM_BACKEND < "${RUNTIME_DIR}/llm-backend"
+        fi
+    elif [[ -z "${ST_PROXY_LLM_BACKEND:-}" ]]; then
+        local choice
+        while true; do
+            print -nru2 -- "Select LLM backend: 1) KoboldCpp  2) TabbyAPI [1]: "
+            IFS= read -r choice || choice=1
+            case "${choice}" in
+                ""|1) LLM_BACKEND=koboldcpp; break ;;
+                2) LLM_BACKEND=tabbyapi; break ;;
+                *) log "enter 1 or 2" ;;
+            esac
+        done
+    fi
     parse_args "$@" || return $?
     prepare_runtime_dir || return 1
 
@@ -997,6 +1033,7 @@ main() {
         return ${lock_status}
     fi
 
+    print -r -- "${LLM_BACKEND}" >| "${RUNTIME_DIR}/llm-backend"
     ensure_service_started llm || return 1
     ensure_service_started pockettts || return 1
     log "waiting for PocketTTS bridge readiness at http://127.0.0.1:${POCKETTTS_PORT}/health"

@@ -40,6 +40,10 @@ def _is_routine_comfy_poll(request: web.Request) -> bool:
 
 
 def _is_passive_llm_metadata(request: web.Request, backend_kind: str) -> bool:
+    if backend_kind == "tabbyapi":
+        return request.method in {"GET", "HEAD"} and request.path.rstrip("/") in {
+            "/v1/models", "/v1/model/list", "/v1/model", "/health", "/props",
+        }
     return (
         backend_kind == "koboldcpp"
         and request.method == "GET"
@@ -47,7 +51,11 @@ def _is_passive_llm_metadata(request: web.Request, backend_kind: str) -> bool:
     )
 
 
-def _inactive_llm_metadata(path: str) -> web.Response:
+def _inactive_llm_metadata(path: str, backend_kind: str = "koboldcpp") -> web.Response:
+    if backend_kind == "tabbyapi":
+        if path.rstrip("/") in {"/v1/models", "/v1/model/list"}:
+            return web.json_response({"object": "list", "data": []})
+        return web.json_response({"detail": "LLM readiness is not currently verified"}, status=503)
     if path == "/v1/models":
         return web.json_response({"object": "list", "data": []})
     return web.json_response({"result": "inactive"})
@@ -286,7 +294,7 @@ class BrokerService:
                             self.llm.info.chat_origin,
                         )
                     else:
-                        response = _inactive_llm_metadata(request.path)
+                        response = _inactive_llm_metadata(request.path, self.llm.info.kind)
             else:
                 async with self.coordinator.chat_lease():
                     response = await proxy_stream(

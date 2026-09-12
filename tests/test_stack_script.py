@@ -743,3 +743,44 @@ def test_proxy_does_not_require_alltalk_ready_response(fake_stack: FakeStack) ->
         if supervisor.poll() is None:
             supervisor.kill()
             supervisor.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("interactive", [False, True])
+def test_tabby_backend_selection_and_existing_start_flow(
+    fake_stack: FakeStack, interactive: bool,
+) -> None:
+    tabby_dir = fake_stack.home / "git" / "tabby"
+    _write_executable(tabby_dir / "start.sh", (fake_stack.llm_dir / "start_HQ.sh").read_text())
+    for key in ("ST_PROXY_LLM_URL", "ST_STACK_LLM_DIR", "ST_STACK_LLM_COMMAND"):
+        fake_stack.env.pop(key)
+    fake_stack.env["ST_PROXY_KOBOLD_URL"] = "http://127.0.0.1:5999"
+    fake_stack.env["ST_PROXY_KOBOLD_ROUTER_MODE"] = "true"
+    if interactive:
+        fake_stack.env.pop("ST_PROXY_LLM_BACKEND")
+    else:
+        fake_stack.env["ST_PROXY_LLM_BACKEND"] = "tabbyapi"
+    process = fake_stack.start(stdin_data="2\n" if interactive else None)
+    events = fake_stack.wait_for_services(process, {"llm", "pockettts", "proxy"})
+    proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
+    command = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    environment = Path(f"/proc/{proxy_pid}/environ").read_bytes().split(b"\0")
+    if interactive:
+        stopped = subprocess.run(
+            ["zsh", str(fake_stack.script), "--stop"],
+            cwd=fake_stack.outside, env=fake_stack.env, capture_output=True,
+            text=True, timeout=15, check=False,
+        )
+        assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+        assert "Select LLM backend" not in stopped.stderr
+    else:
+        process.send_signal(signal.SIGINT)
+    output = process.communicate(timeout=12)[0]
+    assert process.returncode == (143 if interactive else 130)
+    assert "--llm-backend tabbyapi" in command
+    assert "--llm-url http://127.0.0.1:5003" in command
+    assert "--kobold-router-mode" not in command
+    assert b"ST_PROXY_KOBOLD_ROUTER_MODE=false" in environment
+    assert "starting TabbyAPI" in output
+    assert "Select configuration" not in output
+    assert ("Select LLM backend" in output) is interactive
+    assert any(service == "llm" and cwd == tabby_dir for service, cwd, _pid in events)

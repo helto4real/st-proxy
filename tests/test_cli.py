@@ -127,3 +127,18 @@ def test_strict_comfy_route_environment_setting_is_supported() -> None:
         config = config_from_args(build_parser().parse_args(()))
 
     assert not config.allow_unknown_comfy_routes
+
+
+def test_tabby_cli_and_environment_settings() -> None:
+    config = _parse("--llm-backend", "tabbyapi", "--tabby-model", "synthetic-exl3")
+    assert config.llm_url == "http://127.0.0.1:5003"
+    assert config.tabby_model == "synthetic-exl3"
+    assert config.tabby_max_seq_len == 32768
+    with patch.dict(os.environ, {
+        "ST_PROXY_LLM_BACKEND": "tabbyapi",
+        "ST_PROXY_TABBY_MODEL": "synthetic-other",
+        "ST_PROXY_TABBY_MAX_SEQ_LEN": "16384",
+    }, clear=True):
+        config = config_from_args(build_parser().parse_args(()))
+    assert config.tabby_model == "synthetic-other"
+    assert config.tabby_max_seq_len == 16384

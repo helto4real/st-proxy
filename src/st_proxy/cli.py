@@ -84,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kobold-router-mode", action="store_true",
                         default=_env_bool("KOBOLD_ROUTER_MODE"))
     parser.add_argument("--kobold-model-cache", default=_env("KOBOLD_MODEL_CACHE"))
+    parser.add_argument("--tabby-model", default=_env("TABBY_MODEL"),
+                        help="TabbyAPI model name for the first load when no model is loaded")
+    parser.add_argument("--tabby-max-seq-len", type=int,
+                        default=_env_int("TABBY_MAX_SEQ_LEN", 32768))
     parser.add_argument("--max-chat-body-bytes", type=int,
                         default=_env_int("MAX_CHAT_BODY_BYTES", 32 * 1024**2))
     parser.add_argument("--write-kobold-model-cache",
@@ -175,6 +179,8 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         kobold_admin_password=args.kobold_admin_password,
         kobold_router_mode=args.kobold_router_mode,
         kobold_model_cache=args.kobold_model_cache,
+        tabby_model=args.tabby_model,
+        tabby_max_seq_len=args.tabby_max_seq_len,
         max_chat_body_bytes=args.max_chat_body_bytes,
         connect_timeout=args.connect_timeout,
         request_timeout=args.request_timeout,
@@ -220,7 +226,11 @@ async def check_backend(
     ) as session:
         backend = build_llm_backend(session, check_config)
         await backend.validate_control()
-        await backend.snapshot_ready()
+        if config.llm_backend == "tabbyapi":
+            # Server readiness must not require (or trigger) a model load.
+            await backend.observe_ready()
+        else:
+            await backend.snapshot_ready()
         if model_cache:
             if not isinstance(backend, KoboldCppBackend) or not config.kobold_router_mode:
                 raise ConfigurationError("model cache export requires KoboldCpp Router mode")

@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .errors import ConfigurationError
 
-CONVENTIONAL_TEST_UNSAFE_PORTS = frozenset({5001, 5002, 8188, 8189})
+CONVENTIONAL_TEST_UNSAFE_PORTS = frozenset({5001, 5002, 5003, 8188, 8189})
 
 
 def normalize_origin(value: str) -> str:
@@ -71,6 +71,8 @@ class BrokerConfig:
     kobold_admin_password: str | None = None
     kobold_router_mode: bool = False
     kobold_model_cache: str | None = None
+    tabby_model: str | None = None
+    tabby_max_seq_len: int = 32768
     max_chat_body_bytes: int = 32 * 1024**2
     connect_timeout: float = 30.0
     request_timeout: float = 3900.0
@@ -122,6 +124,7 @@ class BrokerConfig:
             if getattr(self, name) <= 0:
                 raise ConfigurationError(f"{name} must be greater than zero")
         for name in (
+            "tabby_max_seq_len",
             "max_chat_body_bytes",
             "comfy_poll_failure_limit",
             "max_workflow_body_bytes",

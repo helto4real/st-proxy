@@ -425,3 +425,19 @@ started above and will unload/reload real models:
 
 Only perform this procedure when you explicitly intend to contact and control
 those real local processes.
+
+### TabbyAPI / ExLlamaV3
+
+`st-stack.zsh` first offers KoboldCpp or TabbyAPI. Set
+`ST_PROXY_LLM_BACKEND=tabbyapi` to skip the menu. TabbyAPI uses the existing
+`~/git/tabby/start.sh` and its native configuration, at `http://127.0.0.1:5003`.
+The existing `ST_STACK_LLM_DIR`, `ST_STACK_LLM_COMMAND`, and `ST_PROXY_LLM_URL`
+overrides still apply. No authentication is added; this adapter expects the
+local TabbyAPI instance with authentication disabled.
+
+For a server starting without a loaded model, set `ST_PROXY_TABBY_MODEL` to the
+native model name. `ST_PROXY_TABBY_MAX_SEQ_LEN` defaults to `32768`. A loaded
+model is observed and saved before handoff. Load settings absent from the API,
+including CPU offload, must already persist through TabbyAPI's native
+`model.use_as_default` or model-local configuration. See the
+[TabbyAPI setup and limitations](docs/USER_GUIDE.md#tabbyapi--exllamav3).

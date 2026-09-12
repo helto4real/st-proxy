@@ -160,3 +160,14 @@ This is logical VRAM ownership through application lifecycle APIs. It cannot
 revoke CUDA device access from a misbehaving process. Hard device exclusion
 requires an external process/container supervisor or an operating-system GPU
 device policy in addition to this broker.
+
+### TabbyAPI lifecycle adapter
+
+TabbyAPI uses the existing explicit lifecycle contract and request-driven startup,
+without KoboldCpp's native-router reservation branch. Its adapter consumes load
+SSE through EOF and verifies the resulting model card, and awaits unload before
+confirming absence of the container. An interrupted load may continue upstream;
+an unconfirmed mutation is retained as an adapter error and cannot be cleared by
+a passive 503 response. No new authentication, routing, or cancellation policy
+is introduced. See the [setup limitations](USER_GUIDE.md#tabbyapi--exllamav3) for
+native defaults needed to retain offload settings across API reloads.

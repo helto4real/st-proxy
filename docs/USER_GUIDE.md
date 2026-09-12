@@ -2,7 +2,7 @@
 
 `st-vram-proxy` lets SillyTavern use a supported LLM backend for chat and
 ComfyUI for image generation on a single GPU. It queues requests in arrival
-order and ensures that only one backend owns GPU VRAM at a time. KoboldCpp and
+order and ensures that only one backend owns GPU VRAM at a time. KoboldCpp, TabbyAPI (ExLlamaV3), and
 Ollama are currently supported.
 
 This guide covers installation, first-time setup, everyday operation, status
@@ -449,6 +449,8 @@ environment.
 | `--llm-backend` | `ST_PROXY_LLM_BACKEND` | `koboldcpp` | LLM lifecycle adapter |
 | `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific | Real LLM origin |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` | Real ComfyUI origin |
+| `--tabby-model` | `ST_PROXY_TABBY_MODEL` | unset | Native model name for a cold TabbyAPI load |
+| `--tabby-max-seq-len` | `ST_PROXY_TABBY_MAX_SEQ_LEN` | `32768` | Expected TabbyAPI context length |
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset | KoboldCpp Admin bearer password |
 | `--connect-timeout` | `ST_PROXY_CONNECT_TIMEOUT` | `30` seconds | Maximum pool-acquisition and socket-connect wait |
 | `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `3900` seconds | Maximum idle wait between upstream response bytes |
@@ -778,3 +780,78 @@ Safe stop:
 ```text
 Press Ctrl+C in the proxy terminal.
 ```
+
+## TabbyAPI / ExLlamaV3
+
+Choose TabbyAPI in the stack's first menu, or set `ST_PROXY_LLM_BACKEND=tabbyapi`.
+Enter selects KoboldCpp. `--stop` skips the menu and remembers the supervised
+backend choice. The existing KoboldCpp configuration selection and Router mode
+are unchanged. Ollama remains available through its existing environment setting.
+
+TabbyAPI's default directory is `~/git/tabby`, command is `./start.sh`, and origin
+is `http://127.0.0.1:5003`. The stack does not rewrite TabbyAPI configuration.
+Configure its existing server/model settings for your model directory and keep
+authentication disabled. No keys or new authorization mechanism are introduced.
+Keep native model settings stable for the duration of a proxy run.
+
+Example for the requested model (these settings do not edit TabbyAPI files):
+
+```sh
+export ST_PROXY_LLM_BACKEND=tabbyapi
+export ST_PROXY_TABBY_MODEL=G4-MeroMero-26B-A4B-exl3-3.10bpw
+export ST_PROXY_TABBY_MAX_SEQ_LEN=32768
+./st-stack.zsh
+```
+
+The native TabbyAPI configuration must point at `/home/thhel/models` for that
+installation. A server that already has a model loaded must report the expected
+context length. A server without a model uses `--tabby-model` on the first active
+LLM request. For direct proxy startup, use `--llm-backend tabbyapi`,
+`--tabby-model NAME`, and optionally `--tabby-max-seq-len TOKENS`.
+
+Initialization and `--check-backend` are passive for TabbyAPI. The latter checks
+service health, model listing, and observed model state; it does not load or
+unload a model and cannot prove physical GPU release. Passive client requests to
+`/v1/models`, `/v1/model/list`, `/v1/model`, `/props`, and `/health` never acquire
+GPU ownership. While the LLM is not the verified owner, model lists are empty
+and the other passive endpoints return 503. Use `/broker/status` to observe the
+proxy's state independently of model readiness.
+
+Chat requests, model names, sampling/thinking fields, and response streams pass
+through unchanged. Model selection remains native to TabbyAPI. The adapter
+captures the currently loaded model again before unload, preserving the latest
+native selection without introducing proxy model routing. As with existing
+passthrough backends, direct lifecycle operations and out-of-band calls are
+outside coordinated ownership; do not load models alongside ComfyUI work.
+
+The adapter saves reported context, cache size/mode, chunk size, and vision use.
+It reloads explicitly, consumes the complete load SSE response, and verifies the
+model and saved settings before granting a chat lease. TabbyAPI may emit a
+`finished` component event before generator initialization completes; that event
+alone is insufficient. The normal shared FIFO, response drain, cancellation,
+ComfyUI cleanup, and request-driven restoration policies are retained.
+
+TabbyAPI's load API and model card do not expose every native setting. CPU MoE
+settings (`cpu_moe_offload_layers`, `cpu_moe_split_experts`, `cpu_moe_threads`),
+`vision_offload`, batch limits, and other unreported settings must be preserved
+using TabbyAPI's existing `model.use_as_default` or model-local settings. In
+particular, startup-only settings are not automatically defaults for API loads.
+Model-local `tabby_config.yml` overrides take precedence over API load values;
+reported settings that differ after reload cause an error. Prompt templates and
+thinking semantics remain entirely with TabbyAPI. The proxy does not modify them.
+
+A failed or disconnected lifecycle operation leaves GPU ownership unconfirmed.
+TabbyAPI continues a load after its client disconnects, so a later “no model”
+response cannot clear that uncertainty. The adapter blocks further handoffs;
+resolve the backend's operation/resource state before restarting the proxy.
+It does not automatically restart services. Ordinary ComfyUI cleanup failures
+retain the existing retry-on-next-active-request behavior.
+
+### Separate live acceptance test
+
+After explicitly authorizing live GPU work, use synthetic chat and workflow
+inputs to exercise LLM → ComfyUI → LLM. Measure actual VRAM release after unload,
+verify that no generation overlaps the handoff, and check restored model,
+32768-token context, cache and native offload settings. Repeat with a disconnected
+stream. Fake-backend tests verify HTTP/lifecycle ordering only; they do not
+establish physical GPU release or the installed model configuration.
