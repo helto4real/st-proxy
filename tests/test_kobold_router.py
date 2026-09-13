@@ -192,6 +192,14 @@ class RouterBrokerTests(unittest.IsolatedAsyncioTestCase):
             await response.read()
             return response.status
 
+    async def test_thinking_payload_unchanged_in_kobold_router(self):
+        raw = (b'{"model":"a.kcpps", "reasoning_effort":"low", "max_tokens":100,'
+               b'"thinking_budget_tokens":17,"chat_template_kwargs":{"enable_thinking":true}}')
+        async with self.client.post(self.chat + "/v1/chat/completions", data=raw) as response:
+            self.assertEqual(response.status, 200)
+            await response.read()
+        self.assertEqual(self.router.bodies[-1], raw)
+
     async def test_cached_discovery_is_passive_at_start_and_during_comfy(self):
         self.assertEqual(self.router.request_paths, [])
         for during_comfy in (False, True):

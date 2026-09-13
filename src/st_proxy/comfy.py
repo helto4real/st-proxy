@@ -171,7 +171,14 @@ class ComfyClient:
                         raise backend_error(
                             "ComfyUI", "model cleanup", f"HTTP {response.status}"
                         )
-                    LOG.info("ComfyUI VRAM cleanup completed: status=%s", response.status)
+                    LOG.info(
+                        "ComfyUI VRAM cleanup accepted: status=%s; "
+                        "waiting 5 seconds before LLM reload",
+                        response.status,
+                    )
+                # /free acknowledges queued cleanup, not physical VRAM release.
+                await asyncio.sleep(5.0)
+                LOG.info("ComfyUI cleanup wait completed")
         except UpstreamError:
             raise
         except (ClientError, TimeoutError) as exc:

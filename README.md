@@ -441,3 +441,9 @@ model is observed and saved before handoff. Load settings absent from the API,
 including CPU offload, must already persist through TabbyAPI's native
 `model.use_as_default` or model-local configuration. See the
 [TabbyAPI setup and limitations](docs/USER_GUIDE.md#tabbyapi--exllamav3).
+
+Tabby chat maps Minimal/Low/Medium reasoning effort to 10%/25%/50% of the
+request's output limit; explicit budgets take precedence. High/Unset requires
+Tabby's server default reasoning budget to be disabled. Total output limits and
+response streams are preserved. See [thinking controls and limitations](
+docs/USER_GUIDE.md#thinking-controls-for-tabbyapi-chat).

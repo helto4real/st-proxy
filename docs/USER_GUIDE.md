@@ -817,8 +817,9 @@ GPU ownership. While the LLM is not the verified owner, model lists are empty
 and the other passive endpoints return 503. Use `/broker/status` to observe the
 proxy's state independently of model readiness.
 
-Chat requests, model names, sampling/thinking fields, and response streams pass
-through unchanged. Model selection remains native to TabbyAPI. The adapter
+Model names, messages, sampling fields, total output limits, and response streams
+pass through unchanged. Thinking controls receive the small compatibility mapping
+described below. Model selection remains native to TabbyAPI. The adapter
 captures the currently loaded model again before unload, preserving the latest
 native selection without introducing proxy model routing. As with existing
 passthrough backends, direct lifecycle operations and out-of-band calls are
@@ -838,7 +839,8 @@ using TabbyAPI's existing `model.use_as_default` or model-local settings. In
 particular, startup-only settings are not automatically defaults for API loads.
 Model-local `tabby_config.yml` overrides take precedence over API load values;
 reported settings that differ after reload cause an error. Prompt templates and
-thinking semantics remain entirely with TabbyAPI. The proxy does not modify them.
+reasoning generation remain TabbyAPI responsibilities; the proxy only adapts
+request controls as described below.
 
 A failed or disconnected lifecycle operation leaves GPU ownership unconfirmed.
 TabbyAPI continues a load after its client disconnects, so a later “no model”
@@ -846,6 +848,74 @@ response cannot clear that uncertainty. The adapter blocks further handoffs;
 resolve the backend's operation/resource state before restarting the proxy.
 It does not automatically restart services. Ordinary ComfyUI cleanup failures
 retain the existing retry-on-next-active-request behavior.
+
+ComfyUI's `/free` response acknowledges a cleanup request, not completed GPU
+memory release. The proxy waits five seconds after a successful response before
+continuing LLM restoration. This fixed margin applies to all LLM backends and is
+included in the existing cleanup timeout; it does not verify that VRAM is free.
+
+### Thinking controls for TabbyAPI chat
+
+Only `POST /v1/chat/completions` receives this mapping. KoboldCpp (including
+Router mode) retains its existing payload handling. Tabby chat bodies use the
+existing `--max-chat-body-bytes` limit (32 MiB by default), including chunked
+requests, before forwarding through the same chat lease and streaming transport.
+
+For a positive request output limit `M`, the effective `reasoning_effort` maps to:
+
+| Effort | Added `reasoning_budget_tokens` |
+| --- | --- |
+| `minimal` | `floor(M / 10)` |
+| `low` | `floor(M / 4)` |
+| `medium` | `floor(M / 2)` |
+| `high`, unset, or unknown | No calculated budget |
+| `none` / `off` | Disable thinking when no explicit thinking toggle is supplied |
+
+`M` follows Tabby's first-present alias order: `max_tokens`,
+`max_completion_tokens`, then `max_length`. The total output limit is preserved;
+reasoning consumes part of that limit. No tokens are added or subtracted. Without
+a positive integer request limit, the proxy forwards the effort without inventing
+a budget or rejecting the request. It does not infer server sampler defaults,
+forced overrides, or available context length. Tiny limits can round down to zero;
+a zero budget ends reasoning as it starts and is distinct from disabling thinking.
+
+Native explicit budget fields retain Tabby's first-present alias order:
+`reasoning_budget_tokens`, `reasoning_budget`, `thinking_budget`, then
+`thinking_token_budget`. A nonnegative native budget, including zero, wins over
+`reasoning.max_tokens`, the Kobold compatibility field `thinking_budget_tokens`,
+and a calculated level. A null or negative native budget still falls back to
+`reasoning.max_tokens`; lower-priority aliases remain ignored. When neither native
+source supplies a budget, `thinking_budget_tokens` is renamed to
+`reasoning_budget_tokens` and takes precedence over level calculation. Explicit
+null/negative budgets without that compatibility field are left intact for Tabby's
+server fallback, rather than replaced by a percentage. Invalid native values are
+left for Tabby's validator. This explicit-budget-first policy intentionally differs
+from KoboldCpp's level-first policy.
+
+Effort and thinking toggles follow Tabby's request priority: the `reasoning`
+object, then non-null flat fields, then `template_vars` (or its lower-priority
+alias `chat_template_kwargs`). An explicit toggle is preserved even if it conflicts
+with `none`/`off`; otherwise these levels add `enable_thinking=false`. Disabled
+thinking does not receive a calculated budget. No message content is inspected.
+
+**High/Unset requires Tabby's model-level default reasoning budget to be disabled
+(`reasoning_budget_tokens: null` or negative).** The proxy does not clear or replace
+that default. Actual Tabby configuration has not been inspected or changed.
+Server `template_vars_force` can override request controls; effective runtime
+behavior still depends on the template and backend.
+
+Tabby ignores reasoning-budget injection when structured generation uses a JSON
+schema, regex, or grammar. These fields and `response_format` are preserved, so
+the mapping does not bypass that restriction. A schema written only in message
+text does not count as a native constraint. A compatible reasoning format and
+backend support for `constrain_output_now` are also required. Injection is an
+approximate threshold and may overshoot with batching/speculative generation;
+it is not a guarantee of exact Kobold token behavior.
+
+Source contract checked against local TabbyAPI `de76ff8` (chat request aliases,
+template variable resolution, reasoning-budget injection, and ExLlamaV3 output
+limits). Automated tests use synthetic HTTP backends and prove request mapping,
+stream draining, and handoff ordering, not actual reasoning output or GPU behavior.
 
 ### Separate live acceptance test
 
@@ -855,3 +925,9 @@ verify that no generation overlaps the handoff, and check restored model,
 32768-token context, cache and native offload settings. Repeat with a disconnected
 stream. Fake-backend tests verify HTTP/lifecycle ordering only; they do not
 establish physical GPU release or the installed model configuration.
+
+For thinking acceptance, compare Minimal/Low/Medium/High/Unset/Off with the same
+positive output limit, both streaming and non-streaming. Confirm explicit budget
+precedence, disabled server defaults, and behavior with native schema/grammar
+constraints. Check thinking toggles with the installed template and verify that
+the installed ExLlamaV3 backend can enforce reasoning-budget injection.

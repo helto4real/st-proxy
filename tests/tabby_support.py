@@ -87,6 +87,7 @@ class MockTabby(MockKobold):
 
     async def chat(self, request):
         raw = await request.read()
+        assert request.content_length == len(raw)
         self.payloads.append(raw)
         payload = json.loads(raw)
         if payload.get("stream"):

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 from aiohttp import ClientSession
 
@@ -175,9 +178,95 @@ class TabbyTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tabby.payloads, [raw, raw])
         self.assertEqual(self.tabby.events, ["chat", "unload", "load", "chat"])
 
+    async def test_adapted_payload_survives_handoff_with_total_limit_intact(self):
+        payload = {
+            "model": "native-name", "max_tokens": 101, "reasoning_effort": "medium",
+            "messages": [{"role": "user", "content": "synthetic å"}],
+            "temperature": 0.71, "unknown": 42,
+        }
+        for run in range(2):
+            async with await self.chat(**payload) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual((await response.json())["choices"][0]["message"]["content"],
+                                 "synthetic")
+            self.assertEqual(json.loads(self.tabby.payloads[-1]), {
+                **payload, "reasoning_budget_tokens": 50,
+            })
+            if not run:
+                (await self.image()).close()
+                await self.comfy_ready()
+        self.assertEqual(self.tabby.events, ["chat", "unload", "load", "chat"])
+
+    async def test_thinking_diagnostic_logs_only_safe_outgoing_values(self):
+        private = "synthetic-private-marker"
+        unrelated = {
+            "messages": [{"role": "user", "content": private}],
+            "model": private, "prompt": private, "response": private,
+            "reasoning_content": private, "unknown": {"path": private},
+        }
+        cases = (
+            ({"reasoning_effort": "low", "max_tokens": 1400},
+             "low", "1400", "350"),
+            ({}, "<absent>", "<absent>", "<absent>"),
+            ({"reasoning_effort": None, "max_tokens": None, "reasoning_budget_tokens": None},
+             "null", "null", "null"),
+            ({"reasoning_effort": private + "\nforged log", "max_tokens": {"secret": private},
+              "reasoning_budget_tokens": [private]}, "<other>", "<other>", "<other>"),
+            ({"reasoning_effort": "medium", "max_tokens": True,
+              "reasoning_budget_tokens": float("inf")}, "medium", "<other>", "<other>"),
+            ({"reasoning_effort": "high", "max_tokens": 1400.0, "reasoning_budget_tokens": 12.5},
+             "high", "1400.0", "12.5"),
+        )
+        for controls, effort, maximum, budget in cases:
+            with self.subTest(controls=controls):
+                with self.assertLogs("st_proxy.service", level="INFO") as logs:
+                    async with self.client.post(
+                        self.chat_url + "/v1/chat/completions", json={**unrelated, **controls},
+                        headers={"Authorization": private, "X-Private": private},
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        await response.read()
+                diagnostics = [record for record in logs.records
+                               if record.getMessage().startswith("TabbyAPI request:")]
+                self.assertEqual(len(diagnostics), 1)
+                self.assertEqual(diagnostics[0].levelname, "INFO")
+                self.assertEqual(
+                    diagnostics[0].getMessage(),
+                    f"TabbyAPI request: reasoning_effort={effort} max_tokens={maximum} "
+                    f"reasoning_budget_tokens={budget}",
+                )
+                self.assertNotIn(private, "\n".join(logs.output))
+                expected = {**unrelated, **controls}
+                if budget == "350":
+                    expected["reasoning_budget_tokens"] = 350
+                self.assertEqual(json.loads(self.tabby.payloads[-1]), expected)
+
+    async def test_chat_body_limit_applies_to_chunked_and_sized_requests(self):
+        self.service.config = replace(self.config, max_chat_body_bytes=64)
+        raw = json.dumps({"messages": ["x" * 100]}).encode()
+
+        async def chunks():
+            yield raw[:50]
+            yield raw[50:]
+
+        for data in (raw, chunks()):
+            async with self.client.post(
+                self.chat_url + "/v1/chat/completions", data=data,
+            ) as response:
+                self.assertEqual(response.status, 413)
+        self.assertEqual(self.tabby.payloads, [])
+
+    async def test_other_tabby_routes_bypass_request_adaptation(self):
+        with patch("st_proxy.service.adapt_chat_request", side_effect=AssertionError):
+            async with self.client.get(self.chat_url + "/v1/models") as response:
+                self.assertEqual(response.status, 200)
+            async with self.client.post(self.chat_url + "/v1/completions", json={}) as response:
+                self.assertEqual(response.status, 404)
+
     async def test_disconnected_stream_drains_before_handoff(self):
         self.tabby.hold_chat = True
-        response = await self.chat(stream=True)
+        response = await self.chat(stream=True, reasoning_effort="low", max_tokens=100)
+        self.assertEqual(json.loads(self.tabby.payloads[-1])["reasoning_budget_tokens"], 25)
         self.assertEqual(await response.content.readline(), b"data: synthetic-one\n")
         response.close()
         image = asyncio.create_task(self.image())
@@ -195,6 +284,26 @@ class TabbyTestCase(unittest.IsolatedAsyncioTestCase):
             response.close()
         self.assertEqual(self.comfy.prompt_calls, [])
         self.assertIsNone(self.service.coordinator.status()["gpu_owner"])
+
+    async def test_reload_waits_five_seconds_after_comfy_cleanup(self):
+        (await self.image()).close()
+        await self.comfy_ready()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        chat = asyncio.create_task(self.chat())
+        try:
+            await wait_until(lambda: self.comfy.free_calls == 1)
+            self.assertEqual(self.service.coordinator.status()["state"], "cleaning_comfy")
+            self.assertEqual(self.tabby.loads, [])
+            response = await chat
+            response.close()
+            self.assertEqual(response.status, 200)
+            self.assertGreaterEqual(loop.time() - started, 5.0)
+            self.assertEqual(len(self.tabby.loads), 1)
+        finally:
+            if not chat.done():
+                chat.cancel()
+                await asyncio.gather(chat, return_exceptions=True)
 
     async def test_failed_comfy_cleanup_can_recover_on_next_chat(self):
         (await self.image()).close()

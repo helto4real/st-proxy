@@ -43,6 +43,7 @@ class MockKobold:
     events: list[str] = field(default_factory=list)
     version_paths: list[str] = field(default_factory=list)
     metadata_paths: list[str] = field(default_factory=list)
+    chat_payloads: list[bytes] = field(default_factory=list)
     chat_requests: int = 0
     chat_started: asyncio.Event = field(default_factory=asyncio.Event)
     chat_release: asyncio.Event = field(default_factory=asyncio.Event)
@@ -130,6 +131,8 @@ class MockKobold:
 
     async def generic(self, _request: web.Request) -> web.Response:
         self.request_paths.append(_request.path)
+        if _request.path == "/v1/chat/completions":
+            self.chat_payloads.append(await _request.read())
         return web.json_response({"ok": True})
 
 

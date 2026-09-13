@@ -174,7 +174,7 @@ class BrokerConfig:
             chat_drain_timeout=5,
             unload_timeout=5,
             reload_timeout=5,
-            cleanup_timeout=5,
+            cleanup_timeout=10,  # Includes the five-second cleanup settling period.
             idle_timeout=60,
             poll_interval=0.01,
             comfy_poll_failure_limit=3,

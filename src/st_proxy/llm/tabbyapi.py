@@ -10,6 +10,91 @@ from aiohttp import ClientError, ClientSession
 from ..http import child_url
 from .base import BackendInfo, BackendTimeouts, RestorePoint, backend_error
 
+_BUDGET_KEYS = (
+    "reasoning_budget_tokens", "reasoning_budget", "thinking_budget", "thinking_token_budget",
+)
+_OUTPUT_KEYS = ("max_tokens", "max_completion_tokens", "max_length")
+_EFFORT_DIVISORS = {"minimal": 10, "low": 4, "medium": 2}
+
+
+def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    # Tabby selects the first present alias, including explicit null.
+    return next((payload[key] for key in keys if key in payload), None)
+
+
+def _integer(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    return None
+
+
+def _budget_falls_back(value: Any) -> bool:
+    integer = _integer(value)
+    return value is None or (integer is not None and integer < 0)
+
+
+def adapt_chat_request(body: bytes) -> bytes:
+    """Translate thinking controls for Tabby chat without changing output limits.
+
+    Preserve native alias/fallback semantics and leave backend validation to
+    Tabby. No change means the original bytes (including formatting) survive.
+    """
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeError):
+        return body
+    if not isinstance(payload, dict):
+        return body
+    reasoning = payload.get("reasoning")
+    if reasoning is None:
+        reasoning = {}
+    template = _first_present(payload, ("template_vars", "chat_template_kwargs"))
+    if not isinstance(reasoning, dict) or (template is not None and not isinstance(template, dict)):
+        return body
+    template = template or {}
+    effort = reasoning.get("effort")
+    enabled = reasoning.get("enabled")
+    if payload.get("reasoning_effort") is not None:
+        effort = payload["reasoning_effort"]
+    if payload.get("enable_thinking") is not None:
+        enabled = payload["enable_thinking"]
+    effort = template.get("reasoning_effort", effort)
+    enabled = template.get("enable_thinking", enabled)
+    effort = effort.strip().lower() if isinstance(effort, str) else None
+    changed = False
+    if effort in {"none", "off"} and enabled is None and "enable_thinking" not in template:
+        payload["enable_thinking"] = False
+        changed = True
+
+    native = _first_present(payload, _BUDGET_KEYS)
+    nested = reasoning.get("max_tokens")
+    # Invalid native values also stay with Tabby's validator; never mask them.
+    native_wins = not _budget_falls_back(native) or not _budget_falls_back(nested)
+    if not native_wins and "thinking_budget_tokens" in payload:
+        payload["reasoning_budget_tokens"] = payload.pop("thinking_budget_tokens")
+        changed = True
+    elif (
+        not native_wins
+        and not any(key in payload for key in _BUDGET_KEYS)
+        and "max_tokens" not in reasoning
+        and enabled is not False
+        and effort in _EFFORT_DIVISORS
+    ):
+        output_limit = _integer(_first_present(payload, _OUTPUT_KEYS))
+        if output_limit is not None and output_limit > 0:
+            payload["reasoning_budget_tokens"] = output_limit // _EFFORT_DIVISORS[effort]
+            changed = True
+    if not changed:
+        return body
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
+
 
 @dataclass(slots=True)
 class TabbyApiRestorePoint:
@@ -19,7 +104,7 @@ class TabbyApiRestorePoint:
 
 
 class TabbyApiBackend:
-    """TabbyAPI's explicit load/unload lifecycle; no generation payload rewriting.
+    """TabbyAPI's explicit load/unload lifecycle.
 
     Offload and other settings absent from the model API remain TabbyAPI's
     responsibility (model.use_as_default / model-local configuration).

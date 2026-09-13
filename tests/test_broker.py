@@ -56,6 +56,14 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
     def image_url(self) -> str:
         return f"http://127.0.0.1:{self.service.image_port}"
 
+    async def test_thinking_payload_unchanged_in_kobold(self):
+        raw = (b'{"reasoning_effort":"low", "max_tokens":100, "thinking_budget_tokens":17,'
+               b'"chat_template_kwargs":{"enable_thinking":true}}')
+        async with self.client.post(self.chat_url + "/v1/chat/completions", data=raw) as response:
+            self.assertEqual(response.status, 200)
+            await response.read()
+        self.assertEqual(self.kobold.chat_payloads, [raw])
+
     async def post_prompt(self):
         return await self.client.post(f"{self.image_url}/prompt", json=prompt_payload())
 
@@ -260,7 +268,8 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         logs = "\n".join(captured.output)
         self.assertIn("target=KoboldCpp method=POST path=/v1/chat/completions", logs)
         self.assertIn("target=ComfyUI method=POST path=/prompt status=200", logs)
-        self.assertIn("ComfyUI VRAM cleanup completed", logs)
+        self.assertIn("ComfyUI VRAM cleanup accepted", logs)
+        self.assertIn("ComfyUI cleanup wait completed", logs)
         self.assertIn("GPU ownership transferred: owner=ComfyUI", logs)
         self.assertIn("GPU ownership transferred: owner=KoboldCpp", logs)
         self.assertNotIn("query-secret", logs)

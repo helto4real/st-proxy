@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from typing import Any
 
@@ -17,6 +18,7 @@ from .http import BufferedResponse, proxy_stream, proxy_websocket, upstream_requ
 from .kobold_router import ABORT_PATH, TEXT_PATHS, default_model_body, read_model_cache
 from .llm import LlmBackend, build_llm_backend
 from .llm.koboldcpp import KoboldCppBackend
+from .llm.tabbyapi import adapt_chat_request
 
 LOG = logging.getLogger(__name__)
 STATUS_PATH = "/broker/status"
@@ -28,6 +30,35 @@ WEBSOCKET_CONNECTION_LIMIT = 32
 
 class WorkflowBodyTooLarge(ValueError):
     """Raised before a workflow body can grow beyond its configured limit."""
+
+
+def _tabby_thinking_diagnostics(body: bytes) -> tuple[str, ...]:
+    """Allowlist only the three outgoing fields, never arbitrary request text."""
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeError, RecursionError):
+        return ("<other>",) * 3
+    if not isinstance(payload, dict):
+        return ("<other>",) * 3
+
+    def safe_value(key: str) -> str:
+        if key not in payload:
+            return "<absent>"
+        value = payload[key]
+        if value is None:
+            return "null"
+        if key == "reasoning_effort":
+            if isinstance(value, str) and value in {
+                "minimal", "low", "medium", "high", "none", "off", "unset",
+            }:
+                return value
+        elif type(value) is int or (type(value) is float and math.isfinite(value)):
+            return str(value)
+        return "<other>"
+
+    return tuple(safe_value(key) for key in (
+        "reasoning_effort", "max_tokens", "reasoning_budget_tokens",
+    ))
 
 
 def _is_routine_comfy_poll(request: web.Request) -> bool:
@@ -297,10 +328,23 @@ class BrokerService:
                         response = _inactive_llm_metadata(request.path, self.llm.info.kind)
             else:
                 async with self.coordinator.chat_lease():
+                    body = None
+                    if (
+                        self.llm.info.kind == "tabbyapi"
+                        and request.method == "POST"
+                        and request.path.rstrip("/") == "/v1/chat/completions"
+                    ):
+                        body = adapt_chat_request(await self._chat_body(request))
+                        LOG.info(
+                            "TabbyAPI request: reasoning_effort=%s max_tokens=%s "
+                            "reasoning_budget_tokens=%s",
+                            *_tabby_thinking_diagnostics(body),
+                        )
                     response = await proxy_stream(
                         request,
                         self.chat_session,
                         self.llm.info.chat_origin,
+                        body=body,
                     )
             LOG.info(
                 "request completed: target=%s method=%s path=%s status=%s duration=%.3fs",
@@ -337,7 +381,7 @@ class BrokerService:
                 status=502,
             )
 
-    async def _router_body(self, request: web.Request) -> bytes:
+    async def _chat_body(self, request: web.Request) -> bytes:
         try:
             async with asyncio.timeout(self.config.request_timeout):
                 return await _read_workflow_body(request, self.config.max_chat_body_bytes)
@@ -370,7 +414,7 @@ class BrokerService:
             async with self.coordinator.router_control(abort=abort) as available:
                 if not available:
                     raise ChatUnavailable("router control is unavailable during GPU transition")
-                body = await self._router_body(request) if request.can_read_body else b""
+                body = await self._chat_body(request) if request.can_read_body else b""
                 return await proxy_stream(
                     request, self.chat_session, self.llm.info.chat_origin, body=body,
                 )
@@ -403,7 +447,7 @@ class BrokerService:
             acquired.set()
             if request.transport is None or request.transport.is_closing():
                 return web.Response(status=499)
-            body = await self._router_body(request)
+            body = await self._chat_body(request)
             path = request.path.rstrip("/")
             if request.method == "POST" and path in TEXT_PATHS:
                 try:
