@@ -12,6 +12,7 @@ class MockTabby(MockKobold):
     def __init__(self) -> None:
         super().__init__()
         self.model = "synthetic-exl3"
+        self.available_models = ["synthetic-exl3", "another-exl3"]
         self.parameters = {
             "max_seq_len": 32768, "cache_size": 65536,
             "cache_mode": "Q4", "chunk_size": 2048, "use_vision": False,
@@ -23,6 +24,7 @@ class MockTabby(MockKobold):
         self.load_release = asyncio.Event()
         self.hold_load = False
         self.wrong_context = False
+        self.model_overrides: dict[str, dict] = {}
         self.payloads: list[bytes] = []
 
     def app(self) -> web.Application:
@@ -39,6 +41,13 @@ class MockTabby(MockKobold):
     async def health(self, request):
         self.request_paths.append(request.path)
         return web.json_response({"status": "healthy", "issues": []})
+
+    async def get_models(self, request):
+        self.request_paths.append(request.path)
+        return web.json_response({
+            "object": "list",
+            "data": [{"id": name, "object": "model"} for name in self.available_models],
+        })
 
     async def current(self, request):
         self.request_paths.append(request.path)
@@ -68,6 +77,7 @@ class MockTabby(MockKobold):
             self.parameters.update({
                 key: payload[key] for key in self.parameters if key in payload
             })
+            self.parameters.update(self.model_overrides.get(self.model, {}))
             if self.wrong_context:
                 self.parameters["max_seq_len"] = 4096
         try:

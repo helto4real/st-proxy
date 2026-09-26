@@ -32,6 +32,13 @@ configure_llm_backend() {
             LLM_DEFAULT_DIR="${HOME}/git/cobolcpp"
             LLM_DEFAULT_COMMAND="${KOBOLD_EXECUTABLE}"
             ;;
+        prism)
+            LLM_LABEL="Prism"
+            LLM_DEFAULT_URL="http://127.0.0.1:5006"
+            LLM_DEFAULT_DIR="${HOME}/git/prism"
+            LLM_DEFAULT_COMMAND="./start.sh"
+            export ST_PROXY_KOBOLD_ROUTER_MODE=false
+            ;;
         tabbyapi)
             LLM_LABEL="TabbyAPI"
             LLM_DEFAULT_URL="http://127.0.0.1:5003"
@@ -51,7 +58,7 @@ configure_llm_backend() {
             ;;
     esac
     typeset -g LLM_URL="${ST_PROXY_LLM_URL:-${LLM_DEFAULT_URL}}"
-    if [[ "${LLM_BACKEND}" != tabbyapi ]]; then
+    if [[ "${LLM_BACKEND}" != tabbyapi && "${LLM_BACKEND}" != prism ]]; then
         LLM_URL="${ST_PROXY_LLM_URL:-${ST_PROXY_KOBOLD_URL:-${LLM_DEFAULT_URL}}}"
     fi
     typeset -g LLM_DIR="${ST_STACK_LLM_DIR:-${LLM_DEFAULT_DIR}}"
@@ -60,6 +67,9 @@ configure_llm_backend() {
     typeset -g LLM_COMMAND_NAME=""
     if (( ${#LLM_COMMAND} )); then
         LLM_COMMAND_NAME=${LLM_COMMAND[1]:t:l}
+    fi
+    if [[ "${LLM_BACKEND}" == prism ]] && (( ! LLM_COMMAND_EXPLICIT )); then
+        LLM_COMMAND_NAME="llama-server"
     fi
     typeset -g KOBOLD_CONFIG_DIR="${ST_STACK_KOBOLD_CONFIG_DIR:-${LLM_DIR}/models}"
     typeset -g KOBOLD_CONFIG_SETTING="${ST_STACK_KOBOLD_CONFIG:-}"
@@ -659,9 +669,8 @@ wait_for_dependencies() {
     while (( SECONDS < deadline )); do
         missing=()
         llm_ready || missing+=(llm)
-        pockettts_ready || missing+=(pockettts)
         if (( ${#missing} == 0 )); then
-            log "${LLM_LABEL} and PocketTTS bridge are running"
+            log "${LLM_LABEL} is running"
             return 0
         fi
         sleep 0.2
@@ -826,7 +835,6 @@ cleanup() {
     CLEANUP_STARTED=1
 
     stop_service proxy || result=1
-    stop_service pockettts || result=1
     stop_service llm || result=1
 
     if (( result == 0 )); then
@@ -904,7 +912,6 @@ stop_stack() {
 
     CLEANUP_STARTED=0
     stop_service proxy || result=1
-    stop_service pockettts || result=1
     stop_service llm || result=1
     (( result == 0 )) && cleanup_kobold_runtime
     rm -f -- "${SUPERVISOR_FILE}"
@@ -920,7 +927,6 @@ stop_stack() {
 monitor_stack() {
     local current_proxy_state="healthy"
     local previous_proxy_state="healthy"
-    local pockettts_available=1
 
     while true; do
         if ! service_running proxy; then
@@ -949,16 +955,6 @@ monitor_stack() {
                     ;;
             esac
             previous_proxy_state=${current_proxy_state}
-        fi
-
-        if ! service_running pockettts && ! pockettts_ready; then
-            if (( pockettts_available )); then
-                log "PocketTTS bridge is no longer running or ready; keeping the proxy running"
-                pockettts_available=0
-            fi
-        elif (( ! pockettts_available )); then
-            log "PocketTTS bridge is running or ready again"
-            pockettts_available=1
         fi
 
         sleep 1
@@ -1008,12 +1004,13 @@ main() {
     elif [[ -z "${ST_PROXY_LLM_BACKEND:-}" ]]; then
         local choice
         while true; do
-            print -nru2 -- "Select LLM backend: 1) KoboldCpp  2) TabbyAPI [1]: "
+            print -nru2 -- "Select LLM backend: 1) KoboldCpp  2) TabbyAPI  3) Prism [1]: "
             IFS= read -r choice || choice=1
             case "${choice}" in
                 ""|1) LLM_BACKEND=koboldcpp; break ;;
                 2) LLM_BACKEND=tabbyapi; break ;;
-                *) log "enter 1 or 2" ;;
+                3) LLM_BACKEND=prism; break ;;
+                *) log "enter 1, 2 or 3" ;;
             esac
         done
     fi
@@ -1035,9 +1032,6 @@ main() {
 
     print -r -- "${LLM_BACKEND}" >| "${RUNTIME_DIR}/llm-backend"
     ensure_service_started llm || return 1
-    ensure_service_started pockettts || return 1
-    log "waiting for PocketTTS bridge readiness at http://127.0.0.1:${POCKETTTS_PORT}/health"
-    wait_for_pockettts || return 1
     log "waiting for ${LLM_LABEL} readiness at ${LLM_URL}"
     wait_for_dependencies || return 1
 

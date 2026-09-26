@@ -192,12 +192,7 @@ class TabbyApiBackend:
     async def observe_ready(self) -> TabbyApiRestorePoint | None:
         self._require_certain()
         try:
-            observed = await self._observe()
-            if observed is not None and observed.parameters["max_seq_len"] != self._max_seq_len:
-                raise backend_error(
-                    self.info.label, "readiness", "context differs from --tabby-max-seq-len",
-                )
-            return observed
+            return await self._observe()
         except (ClientError, TimeoutError, ValueError) as exc:
             raise backend_error(self.info.label, "model observation", type(exc).__name__) from exc
 
@@ -281,16 +276,15 @@ class TabbyApiBackend:
     async def acquire_gpu(self, target: RestorePoint | None) -> TabbyApiRestorePoint:
         self._require_certain()
         restore = self._target(target) if target is not None else None
+        # A first load can apply Tabby's model-local overrides to the fallback
+        # context. Subsequent restores must match every saved setting exactly.
+        expected_parameters = restore.parameters if restore is not None else {}
         if restore is None:
             if not self._model:
                 raise backend_error(
                     self.info.label, "load", "no loaded model; configure --tabby-model",
                 )
             restore = TabbyApiRestorePoint(self._model, {"max_seq_len": self._max_seq_len})
-        if restore.parameters["max_seq_len"] != self._max_seq_len:
-            raise backend_error(
-                self.info.label, "restore validation", "context differs from --tabby-max-seq-len",
-            )
         try:
             async with asyncio.timeout(self._timeouts.acquire):
                 current = await self._observe()
@@ -306,7 +300,7 @@ class TabbyApiBackend:
                     if current is not None:
                         if current.model != restore.model or any(
                             current.parameters.get(key) != value
-                            for key, value in restore.parameters.items()
+                            for key, value in expected_parameters.items()
                         ):
                             raise backend_error(
                                 self.info.label, "load verification", "model/settings mismatch",

@@ -257,7 +257,7 @@ def test_start_order_working_directories_and_logging(
 ) -> None:
     process = fake_stack.start(*(("--log",) if show_logs else ()))
     events = fake_stack.wait_for_services(
-        process, {"llm", "pockettts", "proxy"}
+        process, {"llm", "proxy"}
     )
 
     proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
@@ -269,15 +269,11 @@ def test_start_order_working_directories_and_logging(
 
     assert process.returncode == 130
     first_event = {service: (index, cwd) for index, (service, cwd, _pid) in enumerate(events)}
-    assert set(first_event) == {"llm", "pockettts", "proxy"}
+    assert set(first_event) == {"llm", "proxy"}
     assert not any("/api/ready" in url for url in readiness_requests)
     assert first_event["llm"][1] == fake_stack.llm_dir
-    assert first_event["pockettts"][1] == fake_stack.pockettts_dir
     assert first_event["proxy"][1] == fake_stack.repo
-    dependency_indexes = [
-        first_event[name][0] for name in ("llm", "pockettts")
-    ]
-    assert first_event["proxy"][0] > max(dependency_indexes)
+    assert first_event["proxy"][0] > first_event["llm"][0]
 
     assert "--llm-backend koboldcpp" in proxy_command
     assert "--llm-url http://127.0.0.1:5001" in proxy_command
@@ -288,18 +284,15 @@ def test_start_order_working_directories_and_logging(
     assert "--restore-llm-on-idle" not in proxy_command
 
     assert "http://127.0.0.1:5001" in readiness_requests
-    assert "http://127.0.0.1:8008/health" in readiness_requests
+    assert "http://127.0.0.1:8008/health" not in readiness_requests
 
     assert "st-stack: starting KoboldCpp" in output
     assert "SillyTavern" not in output
-    assert "st-stack: starting PocketTTS bridge" in output
+    assert "PocketTTS" not in output
     assert "AllTalk" not in output
     assert "proxy-child-log" in output
-    for child_log in (
-        "llm-child-log",
-        "pockettts-child-log",
-    ):
-        assert (child_log in output) is show_logs
+    assert ("llm-child-log" in output) is show_logs
+    assert "pockettts-child-log" not in output
 
 
 def test_koboldcpp_config_setting_accepts_relative_name_without_extension(
@@ -322,7 +315,7 @@ def test_koboldcpp_config_setting_accepts_relative_name_without_extension(
 
     supervisor = fake_stack.start()
     events = fake_stack.wait_for_services(
-        supervisor, {"llm", "pockettts", "proxy"}
+        supervisor, {"llm", "proxy"}
     )
     llm_pid = next(pid for service, _cwd, pid in events if service == "llm")
     llm_command = (
@@ -369,7 +362,7 @@ def test_koboldcpp_prompts_with_sorted_names_without_idle_restore(
 
     supervisor = fake_stack.start(stdin_data="0\nnot-a-number\n2\n")
     events = fake_stack.wait_for_services(
-        supervisor, {"llm", "pockettts", "proxy"}
+        supervisor, {"llm", "proxy"}
     )
     llm_pid = next(pid for service, _cwd, pid in events if service == "llm")
     llm_command = (
@@ -411,7 +404,7 @@ def test_koboldcpp_auto_start_fails_when_models_have_no_configs(
 def test_stop_flag_stops_the_supervised_stack(fake_stack: FakeStack) -> None:
     supervisor = fake_stack.start()
     fake_stack.wait_for_services(
-        supervisor, {"llm", "pockettts", "proxy"}
+        supervisor, {"llm", "proxy"}
     )
 
     stopped = subprocess.run(
@@ -479,7 +472,7 @@ def test_existing_dependencies_are_reused_and_stopped(fake_stack: FakeStack) -> 
 
         supervisor = fake_stack.start()
         fake_stack.wait_for_services(
-            supervisor, {"llm", "pockettts", "proxy"}
+            supervisor, {"llm", "proxy"}
         )
         supervisor.send_signal(signal.SIGINT)
         output = supervisor.communicate(timeout=12)[0]
@@ -487,16 +480,15 @@ def test_existing_dependencies_are_reused_and_stopped(fake_stack: FakeStack) -> 
         assert supervisor.returncode == 130
         assert "KoboldCpp is already reachable" in output
         assert "silly is already running" not in output
-        assert "PocketTTS bridge is already ready on port 8008" in output
+        assert "PocketTTS" not in output
         assert "AllTalk" not in output
         event_names = [service for service, _cwd, _pid in fake_stack.read_events()]
         assert event_names.count("llm") == 1
         assert event_names.count("silly") == 1
         assert event_names.count("pockettts") == 1
         assert event_names.count("alltalk") == 1
-        for process in (external[0], external[2]):
-            process.wait(timeout=5)
-        for process in (external[1], external[3]):
+        external[0].wait(timeout=5)
+        for process in external[1:]:
             assert process.poll() is None
     finally:
         for process in external:
@@ -529,7 +521,7 @@ def test_proxy_port_owner_is_stopped_before_proxy_start(fake_stack: FakeStack) -
     try:
         supervisor = fake_stack.start()
         fake_stack.wait_for_services(
-            supervisor, {"llm", "pockettts", "proxy"}
+            supervisor, {"llm", "proxy"}
         )
         owner.wait(timeout=5)
         supervisor.send_signal(signal.SIGINT)
@@ -545,31 +537,27 @@ def test_proxy_port_owner_is_stopped_before_proxy_start(fake_stack: FakeStack) -
             owner.wait(timeout=5)
 
 
-def test_proxy_waits_for_pockettts_bridge_readiness(fake_stack: FakeStack) -> None:
-    ready_file = fake_stack.root / "pockettts-ready"
-    fake_stack.env["FAKE_POCKETTTS_READY_FILE"] = str(ready_file)
+def test_proxy_does_not_require_pockettts_bridge_readiness(fake_stack: FakeStack) -> None:
+    fake_stack.env["FAKE_POCKETTTS_READY_FILE"] = str(fake_stack.root / "pockettts-not-ready")
     supervisor = fake_stack.start()
 
     try:
-        fake_stack.wait_for_services(supervisor, {"llm", "pockettts"})
-        time.sleep(0.5)
-        event_names = {service for service, _cwd, _pid in fake_stack.read_events()}
-        assert "alltalk" not in event_names
-        assert "proxy" not in event_names
-
-        ready_file.touch()
-        fake_stack.wait_for_services(
-            supervisor, {"llm", "pockettts", "proxy"}
-        )
+        fake_stack.wait_for_services(supervisor, {"llm", "proxy"})
+        time.sleep(1.5)
+        assert supervisor.poll() is None
+        assert "pockettts" not in {
+            service for service, _cwd, _pid in fake_stack.read_events()
+        }
         supervisor.send_signal(signal.SIGINT)
         output = supervisor.communicate(timeout=12)[0]
 
         assert supervisor.returncode == 130
-        assert "waiting for PocketTTS bridge readiness" in output
+        assert "PocketTTS" not in output
+        assert "http://127.0.0.1:8008/health" not in fake_stack.curl_log.read_text()
     finally:
         if supervisor.poll() is None:
-            supervisor.kill()
-            supervisor.communicate(timeout=5)
+            supervisor.send_signal(signal.SIGTERM)
+            supervisor.communicate(timeout=12)
 
 
 def test_proxy_waits_for_llm_backend_readiness(fake_stack: FakeStack) -> None:
@@ -578,7 +566,7 @@ def test_proxy_waits_for_llm_backend_readiness(fake_stack: FakeStack) -> None:
     supervisor = fake_stack.start()
 
     try:
-        fake_stack.wait_for_services(supervisor, {"llm", "pockettts"})
+        fake_stack.wait_for_services(supervisor, {"llm"})
         time.sleep(0.5)
         assert "proxy" not in {
             service for service, _cwd, _pid in fake_stack.read_events()
@@ -586,7 +574,7 @@ def test_proxy_waits_for_llm_backend_readiness(fake_stack: FakeStack) -> None:
 
         ready_file.touch()
         fake_stack.wait_for_services(
-            supervisor, {"llm", "pockettts", "proxy"}
+            supervisor, {"llm", "proxy"}
         )
         supervisor.send_signal(signal.SIGINT)
         output = supervisor.communicate(timeout=12)[0]
@@ -622,7 +610,7 @@ while :; do sleep 1; done
 
     supervisor = fake_stack.start()
     events = fake_stack.wait_for_services(
-        supervisor, {"llm", "pockettts", "proxy"}
+        supervisor, {"llm", "proxy"}
     )
     proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
     proxy_command = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
@@ -638,7 +626,7 @@ while :; do sleep 1; done
 def test_monitor_allows_adapter_to_stop_llm_process(fake_stack: FakeStack) -> None:
     supervisor = fake_stack.start()
     events = fake_stack.wait_for_services(
-        supervisor, {"llm", "pockettts", "proxy"}
+        supervisor, {"llm", "proxy"}
     )
     llm_pid = next(pid for service, _cwd, pid in events if service == "llm")
     os.killpg(llm_pid, signal.SIGTERM)
@@ -650,30 +638,6 @@ def test_monitor_allows_adapter_to_stop_llm_process(fake_stack: FakeStack) -> No
     assert supervisor.returncode == 130, output
 
 
-def test_monitor_keeps_proxy_running_when_pockettts_exits(
-    fake_stack: FakeStack,
-) -> None:
-    supervisor = fake_stack.start()
-    events = fake_stack.wait_for_services(
-        supervisor, {"llm", "pockettts", "proxy"}
-    )
-    pockettts_pid = next(pid for service, _cwd, pid in events if service == "pockettts")
-    proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
-
-    try:
-        os.killpg(pockettts_pid, signal.SIGTERM)
-        time.sleep(1.5)
-        assert supervisor.poll() is None
-        os.kill(proxy_pid, 0)
-    finally:
-        if supervisor.poll() is None:
-            supervisor.send_signal(signal.SIGINT)
-        output = supervisor.communicate(timeout=12)[0]
-
-    assert supervisor.returncode == 130, output
-    assert "PocketTTS bridge is no longer running or ready; keeping the proxy running" in output
-
-
 def test_monitor_keeps_proxy_running_when_broker_reports_backend_unavailable(
     fake_stack: FakeStack,
 ) -> None:
@@ -681,7 +645,7 @@ def test_monitor_keeps_proxy_running_when_broker_reports_backend_unavailable(
     fake_stack.env["FAKE_BROKER_UNHEALTHY_FILE"] = str(unhealthy_file)
     supervisor = fake_stack.start()
     events = fake_stack.wait_for_services(
-        supervisor, {"llm", "pockettts", "proxy"}
+        supervisor, {"llm", "proxy"}
     )
     proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
 
@@ -731,7 +695,7 @@ def test_proxy_does_not_require_alltalk_ready_response(fake_stack: FakeStack) ->
 
     try:
         fake_stack.wait_for_services(
-            supervisor, {"llm", "pockettts", "proxy"}
+            supervisor, {"llm", "proxy"}
         )
         supervisor.send_signal(signal.SIGINT)
         output = supervisor.communicate(timeout=12)[0]
@@ -745,12 +709,21 @@ def test_proxy_does_not_require_alltalk_ready_response(fake_stack: FakeStack) ->
             supervisor.communicate(timeout=5)
 
 
+@pytest.mark.parametrize("backend, directory, port, choice, label", [
+    ("tabbyapi", "tabby", 5003, "2", "TabbyAPI"),
+    ("prism", "prism", 5006, "3", "Prism"),
+])
 @pytest.mark.parametrize("interactive", [False, True])
-def test_tabby_backend_selection_and_existing_start_flow(
+def test_backend_selection_and_existing_start_flow(
     fake_stack: FakeStack, interactive: bool,
+    backend: str, directory: str, port: int, choice: str, label: str,
 ) -> None:
-    tabby_dir = fake_stack.home / "git" / "tabby"
-    _write_executable(tabby_dir / "start.sh", (fake_stack.llm_dir / "start_HQ.sh").read_text())
+    backend_dir = fake_stack.home / "git" / directory
+    _write_executable(backend_dir / "start.sh", (fake_stack.llm_dir / "start_HQ.sh").read_text())
+    if backend == "prism":
+        _write_executable(backend_dir / "llama-server",
+                          (fake_stack.llm_dir / "start_HQ.sh").read_text())
+        _write_executable(backend_dir / "start.sh", "#!/bin/sh\nexec ./llama-server\n")
     for key in ("ST_PROXY_LLM_URL", "ST_STACK_LLM_DIR", "ST_STACK_LLM_COMMAND"):
         fake_stack.env.pop(key)
     fake_stack.env["ST_PROXY_KOBOLD_URL"] = "http://127.0.0.1:5999"
@@ -758,9 +731,9 @@ def test_tabby_backend_selection_and_existing_start_flow(
     if interactive:
         fake_stack.env.pop("ST_PROXY_LLM_BACKEND")
     else:
-        fake_stack.env["ST_PROXY_LLM_BACKEND"] = "tabbyapi"
-    process = fake_stack.start(stdin_data="2\n" if interactive else None)
-    events = fake_stack.wait_for_services(process, {"llm", "pockettts", "proxy"})
+        fake_stack.env["ST_PROXY_LLM_BACKEND"] = backend
+    process = fake_stack.start(stdin_data=f"{choice}\n" if interactive else None)
+    events = fake_stack.wait_for_services(process, {"llm", "proxy"})
     proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
     command = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
     environment = Path(f"/proc/{proxy_pid}/environ").read_bytes().split(b"\0")
@@ -776,11 +749,11 @@ def test_tabby_backend_selection_and_existing_start_flow(
         process.send_signal(signal.SIGINT)
     output = process.communicate(timeout=12)[0]
     assert process.returncode == (143 if interactive else 130)
-    assert "--llm-backend tabbyapi" in command
-    assert "--llm-url http://127.0.0.1:5003" in command
+    assert f"--llm-backend {backend}" in command
+    assert f"--llm-url http://127.0.0.1:{port}" in command
     assert "--kobold-router-mode" not in command
     assert b"ST_PROXY_KOBOLD_ROUTER_MODE=false" in environment
-    assert "starting TabbyAPI" in output
+    assert f"starting {label}" in output
     assert "Select configuration" not in output
     assert ("Select LLM backend" in output) is interactive
-    assert any(service == "llm" and cwd == tabby_dir for service, cwd, _pid in events)
+    assert any(service == "llm" and cwd == backend_dir for service, cwd, _pid in events)

@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .errors import ConfigurationError
 
-CONVENTIONAL_TEST_UNSAFE_PORTS = frozenset({5001, 5002, 5003, 8188, 8189})
+CONVENTIONAL_TEST_UNSAFE_PORTS = frozenset({5001, 5002, 5003, 5006, 8188, 8189})
 
 
 def normalize_origin(value: str) -> str:
@@ -71,6 +71,7 @@ class BrokerConfig:
     kobold_admin_password: str | None = None
     kobold_router_mode: bool = False
     kobold_model_cache: str | None = None
+    prism_model: str = "prism-bonsai-2-27b-abliterated"
     tabby_model: str | None = None
     tabby_max_seq_len: int = 32768
     max_chat_body_bytes: int = 32 * 1024**2
@@ -93,6 +94,8 @@ class BrokerConfig:
     test_registry: TestEndpointRegistry | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self, kobold_url: str | None) -> None:
+        if not self.prism_model.strip():
+            raise ConfigurationError("prism_model cannot be empty")
         if not self.llm_backend:
             raise ConfigurationError("llm_backend cannot be empty")
         if self.kobold_router_mode and self.llm_backend != "koboldcpp":

@@ -142,3 +142,14 @@ def test_tabby_cli_and_environment_settings() -> None:
         config = config_from_args(build_parser().parse_args(()))
     assert config.tabby_model == "synthetic-other"
     assert config.tabby_max_seq_len == 16384
+
+
+def test_prism_cli_and_environment_settings() -> None:
+    config = _parse("--llm-backend", "prism")
+    assert config.llm_url == "http://127.0.0.1:5006"
+    assert config.prism_model == "prism-bonsai-2-27b-abliterated"
+    with patch.dict(os.environ, {
+        "ST_PROXY_LLM_BACKEND": "prism", "ST_PROXY_PRISM_MODEL": "synthetic-prism",
+    }, clear=True):
+        config = config_from_args(build_parser().parse_args(()))
+    assert config.prism_model == "synthetic-prism"

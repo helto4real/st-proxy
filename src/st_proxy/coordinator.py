@@ -53,6 +53,7 @@ class ChatWork:
     ready: asyncio.Future[str | None]
     cancelled: bool = False
     granted: bool = False
+    target: RestorePoint | None = None
 
 
 @dataclass(slots=True)
@@ -173,7 +174,7 @@ class HandoffCoordinator:
     async def initialize(self) -> bool:
         """Start coordination without activating request-driven backends in the background."""
         LOG.info("broker initialization started")
-        if self._llm.info.kind in {"koboldcpp", "tabbyapi"}:
+        if self._llm.info.kind in {"koboldcpp", "tabbyapi", "prism"}:
             async with self._condition:
                 self._owner = GpuOwner.UNKNOWN
                 self._set_state(HandoffState.AWAITING_REQUEST)
@@ -249,14 +250,14 @@ class HandoffCoordinator:
         return True
 
     @contextlib.asynccontextmanager
-    async def chat_lease(self) -> AsyncIterator[None]:
+    async def chat_lease(self, target: RestorePoint | None = None) -> AsyncIterator[None]:
         loop = asyncio.get_running_loop()
         async with self._condition:
             if self._closing:
                 raise ChatUnavailable("broker is shutting down")
             if self._fatal_error:
                 raise ChatUnavailable(self._fatal_error)
-            work = ChatWork(self._next_sequence(), loop.create_future())
+            work = ChatWork(self._next_sequence(), loop.create_future(), target=target)
             self._append_queued(work)
             LOG.info(
                 "chat request queued: sequence=%s waiting_chats=%s",
@@ -468,7 +469,7 @@ class HandoffCoordinator:
     async def _dispatch_chat(self, work: ChatWork) -> None:
         if work.cancelled:
             return
-        if self._config.kobold_router_mode:
+        if self._config.kobold_router_mode or self._llm.info.kind == "prism":
             async with self._condition:
                 while self._active_chats or self._active_llm_metadata:
                     await self._condition.wait()
@@ -478,8 +479,11 @@ class HandoffCoordinator:
                 # preparing the GPU reservation.
                 self._set_state(HandoffState.DRAINING_LLM)
         errors: list[str] = []
-        if self._owner is not GpuOwner.LLM or self._recoverable_error:
-            restored = await self._restore_llm(errors)
+        if (
+            self._owner is not GpuOwner.LLM or self._recoverable_error
+            or (work.target is not None and work.target != self._restore_point)
+        ):
+            restored = await self._restore_llm(errors, target=work.target)
             self._record_errors(errors)
             if not restored:
                 self._resolve_chat(
@@ -503,6 +507,8 @@ class HandoffCoordinator:
             self._active_chats += 1
             if self._config.kobold_router_mode:
                 self._set_state(HandoffState.LLM_RESERVED)
+            elif self._llm.info.kind == "prism":
+                self._set_state(HandoffState.LLM_READY)
             LOG.debug(
                 "chat lease granted: sequence=%s active_chats=%s",
                 work.sequence,
@@ -618,7 +624,10 @@ class HandoffCoordinator:
             self._set_state(HandoffState.COMFY_READY)
             return True
 
-        if self._llm.info.kind in {"koboldcpp", "tabbyapi"} and self._owner is GpuOwner.UNKNOWN:
+        if (
+            self._llm.info.kind in {"koboldcpp", "tabbyapi", "prism"}
+            and self._owner is GpuOwner.UNKNOWN
+        ):
             await self._ensure_control_validated()
             observed = await self._llm.observe_ready()
             if observed is not None:
@@ -643,49 +652,62 @@ class HandoffCoordinator:
         await self._llm.validate_control()
         self._control_validated = True
 
-    async def _restore_llm(self, errors: list[str]) -> bool:
-        if self._owner is GpuOwner.LLM and not self._recoverable_error:
+    async def _restore_llm(
+        self, errors: list[str], *, target: RestorePoint | None = None,
+    ) -> bool:
+        if (
+            self._owner is GpuOwner.LLM and not self._recoverable_error
+            and (target is None or target == self._restore_point)
+        ):
             return True
 
         self._recovering = True
         self._recovery_attempts += 1
-        try:
-            async with self._condition:
-                self._set_state(HandoffState.CLEANING_COMFY)
-                async with asyncio.timeout(self._config.cleanup_timeout):
-                    while self._active_comfy_controls:
-                        await self._condition.wait()
-        except TimeoutError:
-            error = "timed out waiting for ComfyUI control requests to finish"
-            LOG.error(error)
-            errors.append(error)
-            self._record_errors(errors)
-            if not self._closing:
-                await self._mark_recoverable("ComfyUI GPU release is not confirmed")
-            self._recovering = False
-            return False
+        if self._owner is not GpuOwner.LLM or target is None:
+            try:
+                async with self._condition:
+                    self._set_state(HandoffState.CLEANING_COMFY)
+                    async with asyncio.timeout(self._config.cleanup_timeout):
+                        while self._active_comfy_controls:
+                            await self._condition.wait()
+            except TimeoutError:
+                error = "timed out waiting for ComfyUI control requests to finish"
+                LOG.error(error)
+                errors.append(error)
+                self._record_errors(errors)
+                if not self._closing:
+                    await self._mark_recoverable("ComfyUI GPU release is not confirmed")
+                self._recovering = False
+                return False
 
-        try:
-            async with asyncio.timeout(self._config.cleanup_timeout):
-                await self._comfy.free_models()
-        except Exception as exc:
-            LOG.error("ComfyUI cleanup failed; GPU release is unconfirmed: %s", exc)
-            errors.append(str(exc))
-            self._record_errors(errors)
-            if not self._closing:
-                await self._mark_recoverable("ComfyUI GPU release is not confirmed")
-            self._recovering = False
-            return False
+            try:
+                async with asyncio.timeout(self._config.cleanup_timeout):
+                    await self._comfy.free_models()
+            except Exception as exc:
+                LOG.error("ComfyUI cleanup failed; GPU release is unconfirmed: %s", exc)
+                errors.append(str(exc))
+                self._record_errors(errors)
+                if not self._closing:
+                    await self._mark_recoverable("ComfyUI GPU release is not confirmed")
+                self._recovering = False
+                return False
 
         self._owner = GpuOwner.UNKNOWN
         try:
             await self._ensure_control_validated()
-            if self._config.kobold_router_mode:
+            if target is not None:
+                self._set_state(HandoffState.RELOADING_LLM)
+                self._restore_point = await self._llm.acquire_gpu(target)
+                self._owner = GpuOwner.LLM
+            elif self._config.kobold_router_mode:
                 if self._recoverable_error and self._restore_point is not None:
                     await self._llm.release_gpu(self._restore_point)
                 self._restore_point = await self._llm.acquire_gpu(None)
                 self._owner = GpuOwner.LLM
-            elif self._restore_point is None and self._llm.info.kind in {"koboldcpp", "tabbyapi"}:
+            elif (
+                self._restore_point is None
+                and self._llm.info.kind in {"koboldcpp", "tabbyapi", "prism"}
+            ):
                 observed = await self._llm.observe_ready()
                 if observed is not None:
                     self._restore_point = observed

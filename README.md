@@ -8,6 +8,8 @@ Supported LLM backends:
 
 - KoboldCpp, controlled through Model Administration.
 - Ollama, controlled through `/api/ps` and the `keep_alive` lifecycle API.
+- Prism, controlled through the native llama-server router load/unload API.
+  Choose **3) Prism** in `st-stack.zsh`; see [Prism setup](docs/USER_GUIDE.md#prism--ternary-bonsai).
 
 New to the project? Start with the illustrated
 [user guide](docs/USER_GUIDE.md). The gateway and lease boundaries are described
@@ -313,6 +315,7 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--chat-port` | `ST_PROXY_CHAT_PORT` | `5001` |
 | `--image-port` | `ST_PROXY_IMAGE_PORT` | `8188` |
 | `--llm-backend` | `ST_PROXY_LLM_BACKEND` | `koboldcpp` |
+| `--prism-model` | `ST_PROXY_PRISM_MODEL` | `prism-bonsai-2-27b-abliterated` |
 | `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` |
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset |

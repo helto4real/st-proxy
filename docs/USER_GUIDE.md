@@ -2,7 +2,7 @@
 
 `st-vram-proxy` lets SillyTavern use a supported LLM backend for chat and
 ComfyUI for image generation on a single GPU. It queues requests in arrival
-order and ensures that only one backend owns GPU VRAM at a time. KoboldCpp, TabbyAPI (ExLlamaV3), and
+order and ensures that only one backend owns GPU VRAM at a time. KoboldCpp, TabbyAPI (ExLlamaV3), Prism, and
 Ollama are currently supported.
 
 This guide covers installation, first-time setup, everyday operation, status
@@ -449,8 +449,9 @@ environment.
 | `--llm-backend` | `ST_PROXY_LLM_BACKEND` | `koboldcpp` | LLM lifecycle adapter |
 | `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific | Real LLM origin |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` | Real ComfyUI origin |
+| `--prism-model` | `ST_PROXY_PRISM_MODEL` | `prism-bonsai-2-27b-abliterated` | Default Prism preset when model is omitted |
 | `--tabby-model` | `ST_PROXY_TABBY_MODEL` | unset | Native model name for a cold TabbyAPI load |
-| `--tabby-max-seq-len` | `ST_PROXY_TABBY_MAX_SEQ_LEN` | `32768` | Expected TabbyAPI context length |
+| `--tabby-max-seq-len` | `ST_PROXY_TABBY_MAX_SEQ_LEN` | `32768` | Fallback context for the first TabbyAPI load; model profiles override |
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset | KoboldCpp Admin bearer password |
 | `--connect-timeout` | `ST_PROXY_CONNECT_TIMEOUT` | `30` seconds | Maximum pool-acquisition and socket-connect wait |
 | `--request-timeout` | `ST_PROXY_REQUEST_TIMEOUT` | `3900` seconds | Maximum idle wait between upstream response bytes |
@@ -677,7 +678,7 @@ that route to the GPU-sensitive policy before using it alongside the LLM.
 
 The repository includes `st-stack.zsh`, a Linux/Zsh supervisor tailored to the
 repository owner's local multi-service setup. It can supervise a configured
-LLM, PocketTTS, and the proxy. It does not manage SillyTavern, AllTalk, or ComfyUI.
+LLM and the proxy. It does not manage PocketTTS, SillyTavern, AllTalk, or ComfyUI.
 
 This script is not a portable default installation:
 
@@ -804,18 +805,35 @@ export ST_PROXY_TABBY_MAX_SEQ_LEN=32768
 ```
 
 The native TabbyAPI configuration must point at `/home/thhel/models` for that
-installation. A server that already has a model loaded must report the expected
-context length. A server without a model uses `--tabby-model` on the first active
-LLM request. For direct proxy startup, use `--llm-backend tabbyapi`,
+installation. A server that already has a model loaded supplies its own context
+and cache settings. A server without a model uses `--tabby-model` on the first active
+LLM request, with `--tabby-max-seq-len` as a fallback that Tabby's model-local
+configuration can override. For direct proxy startup, use `--llm-backend tabbyapi`,
 `--tabby-model NAME`, and optionally `--tabby-max-seq-len TOKENS`.
+
+For different context limits per model, set these fields in each model folder's
+`tabby_config.yml`, alongside its existing reasoning and vision settings:
+
+```yaml
+model:
+  max_seq_len: 16384
+  cache_size: 16384
+```
+
+For example, one model can use 16384 while another uses 32768. Model-local values
+override API load requests. The proxy adopts the settings reported after the first
+load and preserves each selected model's actual settings across GPU handoffs.
 
 Initialization and `--check-backend` are passive for TabbyAPI. The latter checks
 service health, model listing, and observed model state; it does not load or
-unload a model and cannot prove physical GPU release. Passive client requests to
-`/v1/models`, `/v1/model/list`, `/v1/model`, `/props`, and `/health` never acquire
-GPU ownership. While the LLM is not the verified owner, model lists are empty
-and the other passive endpoints return 503. Use `/broker/status` to observe the
-proxy's state independently of model readiness.
+unload a model and cannot prove physical GPU release. Client `GET` and `HEAD`
+requests to `/v1/models`, `/v1/model/list`, and `/health` are forwarded to TabbyAPI
+regardless of GPU ownership, including before the first active request and while
+ComfyUI owns the GPU. TabbyAPI's responses and authorization rules are preserved;
+these requests never load a model or trigger a GPU handoff. Reads of `/v1/model`
+and `/props` also never acquire GPU ownership, but return 503 while the LLM is not
+the verified owner. Use `/broker/status` to observe the proxy's state independently
+of TabbyAPI service health or model readiness.
 
 Model names, messages, sampling fields, total output limits, and response streams
 pass through unchanged. Thinking controls receive the small compatibility mapping
@@ -838,7 +856,9 @@ settings (`cpu_moe_offload_layers`, `cpu_moe_split_experts`, `cpu_moe_threads`),
 using TabbyAPI's existing `model.use_as_default` or model-local settings. In
 particular, startup-only settings are not automatically defaults for API loads.
 Model-local `tabby_config.yml` overrides take precedence over API load values;
-reported settings that differ after reload cause an error. Prompt templates and
+reported settings that differ from a saved restore point after reload cause an error.
+If you change a profile, reload that model in Tabby while ComfyUI is idle so the
+proxy can capture the new settings before its next handoff. Prompt templates and
 reasoning generation remain TabbyAPI responsibilities; the proxy only adapts
 request controls as described below.
 
@@ -931,3 +951,95 @@ positive output limit, both streaming and non-streaming. Confirm explicit budget
 precedence, disabled server defaults, and behavior with native schema/grammar
 constraints. Check thinking toggles with the installed template and verify that
 the installed ExLlamaV3 backend can enforce reasoning-budget injection.
+
+## Prism / Ternary Bonsai
+
+Choose **3) Prism** in `st-stack.zsh`, or skip the menu with:
+
+```bash
+ST_PROXY_LLM_BACKEND=prism ./st-stack.zsh
+```
+
+The stack starts `~/git/prism/start.sh` as a normal managed child process and
+stops it with the stack. No `prism.service` is used. The native server listens on
+`http://127.0.0.1:5006`; clients use the stack's usual proxy chat URL,
+`http://127.0.0.1:5002/v1`. Select `prism-bonsai-2-27b` for the original model or
+`prism-bonsai-2-27b-abliterated` for Abliterated. Both have a 65536-token context.
+The old unsuffixed ID now refers to the original model, so existing clients that
+want Abliterated must select its new suffixed ID.
+The ordinary `ST_STACK_LLM_DIR`, `ST_STACK_LLM_COMMAND`, and `ST_PROXY_LLM_URL`
+overrides still apply. `--prism-model` / `ST_PROXY_PRISM_MODEL` selects the
+default preset when a request omits `model` (default `prism-bonsai-2-27b-abliterated`).
+An explicit `model` selects any preset listed by the dedicated router. Unknown
+IDs and invalid request bodies are rejected before GPU acquisition.
+
+Prism must run its native llama-server **router mode**, with `--models-max 1`,
+`--no-models-autoload`, and `load-on-startup = false` for every preset. This is how the local
+`~/git/prism` installation is configured. Use a dedicated empty `LLAMA_CACHE`
+directory to keep unrelated cached models out of the router's model list.
+The two local model presets look like:
+
+```ini
+version = 1
+
+[prism-bonsai-2-27b]
+model = /absolute/path/to/Ternary-Bonsai-2-27B-PTQ1_0.gguf
+load-on-startup = false
+sleep-idle-seconds = -1
+
+[prism-bonsai-2-27b-abliterated]
+model = /absolute/path/to/Ternary-Bonsai-2-27B-Abliterated-PTQ1_0.gguf
+load-on-startup = false
+sleep-idle-seconds = -1
+```
+
+Start the native server with `--models-preset /absolute/path/to/models.ini`
+instead of `--model`, plus the normal context, CUDA and reasoning flags.
+The installed launcher uses 64k context, one slot, F16 KV cache, full GPU
+offload and `--reasoning auto --reasoning-format deepseek --reasoning-effort medium`.
+The latter permits per-request `reasoning_effort: "none"` to disable thinking.
+
+The adapter uses `GET /models`, `POST /models/load`, and `POST /models/unload`.
+It verifies `loaded` / `unloaded` after each operation; a successful HTTP
+response alone is insufficient. Unload stops the native model worker and releases
+its GPU memory while the lightweight router stays available. A failed or
+unconfirmed transition blocks handoff; resolve the native state before restarting
+the proxy. Sleeping/loading states during initial observation are also rejected.
+
+Startup, `--check-backend`, health and model-list requests never load the model.
+An active request loads its selected model. Prism requests are serialized in the
+broker FIFO. A model switch waits for active streams and metadata, unloads the
+previous worker, confirms release, then loads the requested preset. Consecutive
+requests for the same model reuse the loaded worker and its prompt cache.
+Read-only `/props`, `/slots` and `/metrics` target the active model; an explicitly
+requested inactive model returns 503 without switching. A ComfyUI request drains active
+streams, unloads the model and confirms release before submitting the workflow.
+Only subsequent active LLM work reloads it. The proxy blocks native lifecycle
+routes and `reload` / `autoload` query overrides. Clients must not bypass the
+proxy to control the native router themselves.
+
+OpenAI-compatible `/v1/chat/completions` JSON and SSE responses are forwarded
+unchanged, including separate `reasoning_content`. Use `none`, `medium` or `xhigh`
+for this model. `low` is accepted by the template, but the model card cautions
+that it may behave like xhigh; for short thinking use `medium` with a positive
+`reasoning_budget_tokens`, such as 512. The proxy does not remap these Prism
+controls. `high` is unsupported by this model and returns a native HTTP 500.
+Budget 0 did not disable thinking in the installed build; use `none` instead.
+
+```bash
+curl http://127.0.0.1:5002/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"prism-bonsai-2-27b","messages":[{"role":"user","content":"What is 6 times 7?"}],"reasoning_effort":"medium","reasoning_budget_tokens":512,"max_tokens":2048}'
+```
+
+The installed build is `prism-b10683-d8f26ee` with Bonsai 2 PTQ1_0. Text chat,
+reasoning, streaming and the real model load/unload cycle were tested through a
+temporary proxy with synthetic ComfyUI. This does not constitute a test of real
+ComfyUI generation or full-context stress. The existing live stack is not restarted
+by installing this adapter; select Prism the next time you start the stack.
+
+Two-model selection was verified with synthetic handoff, streaming, failure and
+cancellation tests (full suite: 184 tests, 60 subtests), plus passive discovery
+through the installed native router on temporary ports. Real two-model GPU
+switching and full 64k context have not been tested. Restart both the proxy and
+Prism to activate the updated presets and routing.

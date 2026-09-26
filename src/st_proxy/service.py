@@ -18,6 +18,7 @@ from .http import BufferedResponse, proxy_stream, proxy_websocket, upstream_requ
 from .kobold_router import ABORT_PATH, TEXT_PATHS, default_model_body, read_model_cache
 from .llm import LlmBackend, build_llm_backend
 from .llm.koboldcpp import KoboldCppBackend
+from .llm.prism import PrismBackend, PrismRestorePoint
 from .llm.tabbyapi import adapt_chat_request
 
 LOG = logging.getLogger(__name__)
@@ -70,10 +71,19 @@ def _is_routine_comfy_poll(request: web.Request) -> bool:
     )
 
 
+def _is_tabby_service_metadata(request: web.Request, backend_kind: str) -> bool:
+    # Service health and model discovery do not require a loaded model or GPU ownership.
+    return (
+        backend_kind == "tabbyapi"
+        and request.method in {"GET", "HEAD"}
+        and request.path.rstrip("/") in {"/v1/models", "/v1/model/list", "/health"}
+    )
+
+
 def _is_passive_llm_metadata(request: web.Request, backend_kind: str) -> bool:
     if backend_kind == "tabbyapi":
         return request.method in {"GET", "HEAD"} and request.path.rstrip("/") in {
-            "/v1/models", "/v1/model/list", "/v1/model", "/health", "/props",
+            "/v1/model", "/props",
         }
     return (
         backend_kind == "koboldcpp"
@@ -84,8 +94,6 @@ def _is_passive_llm_metadata(request: web.Request, backend_kind: str) -> bool:
 
 def _inactive_llm_metadata(path: str, backend_kind: str = "koboldcpp") -> web.Response:
     if backend_kind == "tabbyapi":
-        if path.rstrip("/") in {"/v1/models", "/v1/model/list"}:
-            return web.json_response({"object": "list", "data": []})
         return web.json_response({"detail": "LLM readiness is not currently verified"}, status=503)
     if path == "/v1/models":
         return web.json_response({"object": "list", "data": []})
@@ -312,6 +320,14 @@ class BrokerService:
         try:
             if self.config.kobold_router_mode:
                 response = await self._router_handler(request)
+            elif self.llm.info.kind == "prism":
+                response = await self._prism_handler(request)
+            elif _is_tabby_service_metadata(request, self.llm.info.kind):
+                response = await proxy_stream(
+                    request,
+                    self.chat_session,
+                    self.llm.info.chat_origin,
+                )
             elif _is_passive_llm_metadata(request, self.llm.info.kind):
                 LOG.debug(
                     "passive LLM metadata request bypasses GPU lease: path=%s",
@@ -379,6 +395,83 @@ class BrokerService:
             return web.json_response(
                 {"error": f"{label} upstream request failed"},
                 status=502,
+            )
+
+    async def _prism_handler(self, request: web.Request) -> web.StreamResponse:
+        assert self.coordinator is not None and self.chat_session is not None
+        assert self.llm is not None
+        path = request.path.rstrip("/")
+        # Router reload/autoload overrides and lifecycle operations must not bypass
+        # the broker's GPU handoff, including model-list refresh via GET.
+        if (
+            "autoload" in request.query or "reload" in request.query
+            or path.startswith("/models/")
+            or (path in {"/models", "/v1/models", "/props"}
+                and request.method not in {"GET", "HEAD"})
+        ):
+            raise web.HTTPForbidden(text="model lifecycle is owned by the broker")
+        if request.method in {"GET", "HEAD"} and path in {"/health", "/models", "/v1/models"}:
+            return await proxy_stream(request, self.chat_session, self.llm.info.chat_origin)
+        if request.method in {"GET", "HEAD"} and path in {"/props", "/metrics", "/slots"}:
+            async with self.coordinator.passive_llm_metadata() as available:
+                assert isinstance(self.llm, PrismBackend)
+                active = await self.llm.observe_ready() if available else None
+                requested = request.query.get("model")
+                if active is None or (requested is not None and requested != active.model):
+                    return web.json_response({"error": "Prism model is not active"}, status=503)
+                return await proxy_stream(
+                    request, self.chat_session, self.llm.info.chat_origin,
+                    raw_query=request.rel_url.update_query(model=active.model).raw_query_string,
+                )
+        assert isinstance(self.llm, PrismBackend)
+        body = await self._chat_body(request) if request.can_read_body else b""
+        payload = None
+        if body:
+            try:
+                payload = json.loads(body)
+            except (ValueError, UnicodeError, RecursionError):
+                raise web.HTTPBadRequest(text="expected a JSON object") from None
+            if not isinstance(payload, dict):
+                raise web.HTTPBadRequest(text="expected a JSON object")
+        model = payload.get("model") if payload is not None else request.query.get("model")
+        query_model = request.query.get("model")
+        if payload is not None and query_model is not None and query_model != model:
+            raise web.HTTPBadRequest(text="conflicting body and query model IDs")
+        try:
+            target = await self.llm.request_target(model)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from None
+        if payload is not None and model is None:
+            payload["model"] = target.model
+            body = json.dumps(payload).encode()
+        acquired = asyncio.Event()
+        task = asyncio.create_task(self._prism_chat(request, target, body, acquired))
+        try:
+            while not task.done() and not acquired.is_set():
+                if request.transport is None or request.transport.is_closing():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    return web.Response(status=499)
+                await asyncio.wait({task}, timeout=0.05)
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def _prism_chat(
+        self, request: web.Request, target: PrismRestorePoint, body: bytes,
+        acquired: asyncio.Event,
+    ) -> web.StreamResponse:
+        assert self.coordinator is not None and self.chat_session is not None
+        assert self.llm is not None
+        async with self.coordinator.chat_lease(target):
+            acquired.set()
+            if request.transport is None or request.transport.is_closing():
+                return web.Response(status=499)
+            return await proxy_stream(
+                request, self.chat_session, self.llm.info.chat_origin, body=body,
+                raw_query=request.rel_url.update_query(model=target.model).raw_query_string,
             )
 
     async def _chat_body(self, request: web.Request) -> bytes:

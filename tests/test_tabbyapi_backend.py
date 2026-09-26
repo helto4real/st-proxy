@@ -80,10 +80,13 @@ class TabbyTestCase(unittest.IsolatedAsyncioTestCase):
         target = await self.backend.snapshot_ready()
         self.tabby.model = "another-exl3"
         self.tabby.parameters["cache_mode"] = "Q6"
+        self.tabby.parameters.update(max_seq_len=16384, cache_size=16384)
         await self.backend.release_gpu(target)
         await self.backend.acquire_gpu(target)
         self.assertEqual(self.tabby.loads[0]["model_name"], "another-exl3")
         self.assertEqual(self.tabby.loads[0]["cache_mode"], "Q6")
+        self.assertEqual(self.tabby.loads[0]["max_seq_len"], 16384)
+        self.assertEqual(self.tabby.loads[0]["cache_size"], 16384)
 
     async def test_initialization_and_check_are_passive_when_unloaded(self):
         self.assertEqual(self.tabby.request_paths, [])
@@ -93,6 +96,42 @@ class TabbyTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tabby.loads, [])
         self.assertEqual(self.tabby.unloads, 0)
         self.assertEqual(self.comfy.free_calls, 0)
+
+    async def test_service_metadata_is_forwarded_before_first_active_request(self):
+        self.tabby.model = "inactive"
+        self.assertEqual(self.tabby.request_paths, [])
+        expected_paths = []
+        for path in ("/v1/models", "/v1/model/list", "/health"):
+            for method in ("GET", "HEAD"):
+                with self.subTest(path=path, method=method):
+                    async with self.client.request(method, self.chat_url + path) as response:
+                        self.assertEqual(response.status, 200)
+                        if method == "HEAD":
+                            self.assertEqual(await response.read(), b"")
+                        elif path == "/health":
+                            self.assertEqual(await response.json(), {
+                                "status": "healthy", "issues": [],
+                            })
+                        else:
+                            self.assertEqual(await response.json(), {
+                                "object": "list", "data": [
+                                    {"id": name, "object": "model"}
+                                    for name in self.tabby.available_models
+                                ],
+                            })
+                    expected_paths.append(path)
+        self.assertEqual(self.tabby.request_paths, expected_paths)
+        for path in ("/v1/model", "/props"):
+            async with self.client.get(self.chat_url + path) as response:
+                self.assertEqual(response.status, 503)
+        self.assertEqual(self.tabby.request_paths, expected_paths)
+        self.assertEqual(self.tabby.loads, [])
+        self.assertEqual(self.tabby.unloads, 0)
+        self.assertEqual(self.comfy.free_calls, 0)
+        status = self.service.coordinator.status()
+        self.assertEqual(status["state"], "awaiting_request")
+        self.assertIsNone(status["gpu_owner"])
+        self.assertEqual(status["active_chats"], 0)
 
     async def test_cold_load_uses_configured_context(self):
         self.tabby.model = "inactive"
@@ -145,18 +184,58 @@ class TabbyTestCase(unittest.IsolatedAsyncioTestCase):
             await self.backend.observe_ready()
 
     async def test_wrong_context_is_not_ready(self):
-        self.tabby.model = "inactive"
+        target = await self.backend.snapshot_ready()
+        await self.backend.release_gpu(target)
         self.tabby.wrong_context = True
         with self.assertRaisesRegex(UpstreamError, "mismatch"):
-            await self.backend.acquire_gpu(None)
+            await self.backend.acquire_gpu(target)
+
+    async def test_changed_profile_cache_is_rejected_on_restore(self):
+        target = await self.backend.snapshot_ready()
+        await self.backend.release_gpu(target)
+        self.tabby.model_overrides[target.model] = {"cache_size": 16384}
+        with self.assertRaisesRegex(UpstreamError, "mismatch"):
+            await self.backend.acquire_gpu(target)
+
+    async def test_cold_load_adopts_model_profile_and_restores_it_after_comfy(self):
+        self.tabby.model = "inactive"
+        self.tabby.model_overrides["synthetic-exl3"] = {
+            "max_seq_len": 16384, "cache_size": 16384,
+        }
+        async with await self.chat() as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(self.tabby.loads[0]["max_seq_len"], 32768)
+        self.assertEqual(self.tabby.parameters["max_seq_len"], 16384)
+        (await self.image()).close()
+        await self.comfy_ready()
+        async with await self.chat() as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(len(self.tabby.loads), 2)
+        self.assertEqual(self.tabby.loads[1]["max_seq_len"], 16384)
+        self.assertEqual(self.tabby.loads[1]["cache_size"], 16384)
+        self.assertEqual(self.tabby.events, ["load", "chat", "unload", "load", "chat"])
 
     async def test_passive_routes_do_not_take_gpu_from_comfy(self):
         (await self.image()).close()
         await self.comfy_ready()
-        for path in ("/v1/models", "/v1/model/list", "/v1/model", "/health", "/props"):
+        before = list(self.tabby.request_paths)
+        unloads = self.tabby.unloads
+        for path in ("/v1/models", "/v1/model/list", "/health"):
             async with self.client.get(self.chat_url + path) as response:
-                self.assertIn(response.status, (200, 503))
+                self.assertEqual(response.status, 200)
+                data = await response.json()
+                if path != "/health":
+                    self.assertEqual(
+                        [model["id"] for model in data["data"]], self.tabby.available_models,
+                    )
+        self.assertEqual(
+            self.tabby.request_paths, before + ["/v1/models", "/v1/model/list", "/health"],
+        )
+        for path in ("/v1/model", "/props"):
+            async with self.client.get(self.chat_url + path) as response:
+                self.assertEqual(response.status, 503)
         self.assertEqual(self.tabby.loads, [])
+        self.assertEqual(self.tabby.unloads, unloads)
         self.assertEqual(self.comfy.free_calls, 0)
         self.assertEqual(self.service.coordinator.status()["gpu_owner"], "comfy")
 
@@ -336,12 +415,21 @@ class TabbyTestCase(unittest.IsolatedAsyncioTestCase):
         await self.comfy_ready()
         self.assertEqual(self.tabby.loads, [])
 
-    async def test_context_mismatch_in_existing_model_fails_passively(self):
-        self.tabby.parameters["max_seq_len"] = 4096
-        with self.assertRaises(UpstreamError):
-            await self.backend.observe_ready()
+    async def test_existing_model_context_is_accepted_passively(self):
+        self.tabby.parameters.update(max_seq_len=16384, cache_size=16384)
+        observed = await self.backend.observe_ready()
+        self.assertEqual(observed.parameters["max_seq_len"], 16384)
+        self.assertEqual(observed.parameters["cache_size"], 16384)
+        await check_backend(self.config, 1)
         self.assertEqual(self.tabby.loads, [])
         self.assertEqual(self.tabby.unloads, 0)
+
+    async def test_invalid_observed_context_is_rejected(self):
+        for context in (0, -1, None, True, "16384"):
+            with self.subTest(context=context):
+                self.tabby.parameters["max_seq_len"] = context
+                with self.assertRaises(UpstreamError):
+                    await self.backend.observe_ready()
 
     async def test_test_mode_rejects_tabby_production_port(self):
         with self.assertRaises(ConfigurationError):

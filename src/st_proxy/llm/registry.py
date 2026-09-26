@@ -10,6 +10,7 @@ from ..errors import ConfigurationError
 from .base import BackendTimeouts, LlmBackend
 from .koboldcpp import KoboldCppBackend
 from .ollama import OllamaBackend
+from .prism import PrismBackend
 from .tabbyapi import TabbyApiBackend
 
 if TYPE_CHECKING:
@@ -64,6 +65,12 @@ def _build_tabbyapi(session: ClientSession, config: BrokerConfig) -> TabbyApiBac
     )
 
 
+def _build_prism(session: ClientSession, config: BrokerConfig) -> PrismBackend:
+    return PrismBackend(
+        session, origin=config.llm_url, model=config.prism_model, timeouts=_timeouts(config),
+    )
+
+
 _BACKENDS = {
     "koboldcpp": BackendSpec(
         "koboldcpp",
@@ -77,6 +84,7 @@ _BACKENDS = {
         "http://127.0.0.1:11434",
         _build_ollama,
     ),
+    "prism": BackendSpec("prism", "Prism", "http://127.0.0.1:5006", _build_prism),
     "tabbyapi": BackendSpec(
         "tabbyapi", "TabbyAPI", "http://127.0.0.1:5003", _build_tabbyapi,
     ),

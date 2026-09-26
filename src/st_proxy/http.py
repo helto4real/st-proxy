@@ -40,11 +40,13 @@ def upstream_url(
     request: web.Request,
     *,
     raw_path: str | None = None,
+    raw_query: str | None = None,
 ) -> str:
     base = urlsplit(origin)
     request_raw_path = request.rel_url.raw_path if raw_path is None else raw_path
     joined = f"{base.path.rstrip('/')}/{request_raw_path.lstrip('/')}"
-    return urlunsplit((base.scheme, base.netloc, joined, request.rel_url.raw_query_string, ""))
+    query = request.rel_url.raw_query_string if raw_query is None else raw_query
+    return urlunsplit((base.scheme, base.netloc, joined, query, ""))
 
 
 def child_url(origin: str, path: str) -> str:
@@ -152,11 +154,12 @@ async def proxy_stream(
     origin: str,
     *,
     raw_path: str | None = None,
+    raw_query: str | None = None,
     body: bytes | None = None,
 ) -> web.StreamResponse:
     async with session.request(
         request.method,
-        upstream_url(origin, request, raw_path=raw_path),
+        upstream_url(origin, request, raw_path=raw_path, raw_query=raw_query),
         headers=upstream_request_headers(request, origin),
         data=request_body(request) if body is None else body,
         allow_redirects=False,
