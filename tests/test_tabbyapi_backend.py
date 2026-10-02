@@ -178,10 +178,169 @@ class TabbyTestCase(unittest.IsolatedAsyncioTestCase):
             await self.backend.acquire_gpu(None)
         with self.assertRaises(UpstreamError):
             await self.backend.observe_ready()
+        with self.assertRaises(UpstreamError):
+            await self.backend.acquire_gpu(None)
+        self.assertEqual(len(self.tabby.loads), 1)
+        self.tabby.load_release.set()
+        await wait_until(lambda: self.tabby.model != "inactive")
+        observed = await self.backend.acquire_gpu(None)
+        self.assertEqual(observed.model, "synthetic-exl3")
+        self.assertEqual(len(self.tabby.loads), 1)
+        self.assertEqual(self.tabby.unloads, 0)
+
+    async def test_completed_load_failure_recovers_on_next_chat(self):
+        (await self.image()).close()
+        await self.comfy_ready()
+        self.tabby.load_error = True
+        for attempt in range(2):
+            async with await self.chat() as response:
+                self.assertEqual(response.status, 503)
+            self.assertEqual(len(self.tabby.loads), attempt + 1)
+        # Passive metadata and idle time must not trigger another attempt.
+        async with self.client.get(self.chat_url + "/health") as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(len(self.tabby.loads), 2)
+        self.tabby.load_error = False
+        async with await self.chat() as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(len(self.tabby.loads), 3)
+        self.assertEqual(self.tabby.loads[0], self.tabby.loads[2])
+        self.assertEqual(self.service.coordinator.status()["state"], "llm_ready")
+
+    async def test_failed_cold_load_can_recover_without_restore_point(self):
+        self.tabby.model = "inactive"
+        self.tabby.load_error = True
+        async with await self.chat() as response:
+            self.assertEqual(response.status, 503)
+        self.tabby.load_error = False
+        async with await self.chat() as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(len(self.tabby.loads), 2)
+        self.assertEqual(self.tabby.loads[0], self.tabby.loads[1])
+
+    async def test_vram_failure_is_logged_and_retries_only_on_next_active_request(self):
+        for message in (
+            "CUDA out of memory. private-model /private/path",
+            "RuntimeError: Insufficient VRAM in split for model and cache",
+            "CUDA error: out of memory",
+            "torch.cuda.OutOfMemoryError: private details",
+        ):
+            with self.subTest(message=message):
+                (await self.image()).close()
+                await self.comfy_ready()
+                previous_loads = len(self.tabby.loads)
+                self.tabby.load_error = True
+                self.tabby.load_error_message = message
+                with self.assertLogs("st_proxy", level="ERROR") as captured:
+                    async with await self.chat() as response:
+                        self.assertEqual(response.status, 503)
+                        self.assertIn("insufficient_vram", (await response.json())["error"])
+                logs = "\n".join(captured.output)
+                self.assertIn("not enough GPU memory", logs)
+                self.assertNotIn(message, logs)
+                self.assertNotIn("private", logs)
+                status = self.service.coordinator.status()
+                self.assertEqual(status["state"], "error")
+                self.assertIsNone(status["gpu_owner"])
+                self.assertIn("insufficient_vram", status["last_error"])
+                self.assertEqual(len(self.tabby.loads), previous_loads + 1)
+                async with self.client.get(self.chat_url + "/health") as response:
+                    self.assertEqual(response.status, 200)
+                self.assertEqual(len(self.tabby.loads), previous_loads + 1)
+
+                # A second request retries even if memory is still exhausted.
+                async with await self.chat() as response:
+                    self.assertEqual(response.status, 503)
+                self.assertEqual(len(self.tabby.loads), previous_loads + 2)
+                self.tabby.load_error = False
+                async with await self.chat() as response:
+                    self.assertEqual(response.status, 200)
+                self.assertEqual(len(self.tabby.loads), previous_loads + 3)
+                self.assertEqual(self.tabby.loads[-1], self.tabby.loads[-3])
+                self.assertEqual(self.service.coordinator.status()["state"], "llm_ready")
+
+    async def test_vram_error_is_logged_before_stream_end_without_authorizing_retry(self):
+        self.tabby.model = "inactive"
+        self.tabby.load_error = True
+        self.tabby.load_error_message = "CUDA out of memory"
+        self.tabby.hold_error_stream = True
+        self.backend._timeouts = BackendTimeouts(1, 1, 0.2, 0.01)
+        with self.assertLogs("st_proxy", level="ERROR") as captured:
+            load = asyncio.create_task(self.backend.acquire_gpu(None))
+            await self.tabby.error_sent.wait()
+            await wait_until(lambda: bool(captured.output))
+            self.assertFalse(load.done())
+            self.assertIn("insufficient_vram", "\n".join(captured.output))
+            with self.assertRaises(UpstreamError):
+                await load
+        with self.assertRaises(UpstreamError):
+            await self.backend.acquire_gpu(None)
+        self.assertEqual(len(self.tabby.loads), 1)
+
+    async def test_unknown_load_error_is_not_classified_as_vram(self):
+        self.tabby.model = "inactive"
+        self.tabby.load_error = True
+        self.tabby.load_error_message = "invalid private-model at /private/path"
+        with self.assertLogs("st_proxy", level="ERROR") as captured:
+            async with await self.chat() as response:
+                self.assertEqual(response.status, 503)
+                self.assertNotIn("insufficient_vram", await response.text())
+        logs = "\n".join(captured.output)
+        self.assertIn("backend reported a load failure", logs)
+        self.assertNotIn("insufficient_vram", logs)
+        self.assertNotIn("private", logs)
+
+    async def test_cold_cleanup_recovery_preserves_native_model_selection(self):
+        self.tabby.model = "another-exl3"
+        self.comfy.cleanup_failures = 1
+        async with await self.chat() as response:
+            self.assertEqual(response.status, 503)
+        async with await self.chat() as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(self.tabby.model, "another-exl3")
+        self.assertEqual(self.tabby.loads, [])
+        self.assertEqual(self.tabby.unloads, 0)
+
+    async def test_error_without_stream_end_does_not_allow_retry(self):
+        self.backend._timeouts = BackendTimeouts(1, 1, 0.05, 0.01)
+        self.tabby.model = "inactive"
+        self.tabby.load_error = True
+        self.tabby.hold_error_stream = True
+        with self.assertRaises(UpstreamError):
+            await self.backend.acquire_gpu(None)
+        self.assertTrue(self.tabby.error_sent.is_set())
+        with self.assertRaises(UpstreamError):
+            await self.backend.acquire_gpu(None)
+        with self.assertRaises(UpstreamError):
+            await self.backend.observe_ready()
+        self.assertEqual(len(self.tabby.loads), 1)
+
+    async def test_delayed_load_with_wrong_saved_settings_stays_blocked(self):
+        target = await self.backend.snapshot_ready()
+        await self.backend.release_gpu(target)
+        self.backend._timeouts = BackendTimeouts(1, 1, 0.05, 0.01)
+        self.tabby.hold_load = True
+        self.tabby.wrong_context = True
+        with self.assertRaises(UpstreamError):
+            await self.backend.acquire_gpu(target)
         self.tabby.load_release.set()
         await wait_until(lambda: self.tabby.model != "inactive")
         with self.assertRaises(UpstreamError):
+            await self.backend.acquire_gpu(target)
+        with self.assertRaises(UpstreamError):
             await self.backend.observe_ready()
+        self.assertEqual(len(self.tabby.loads), 1)
+
+    async def test_failed_unload_can_be_reconciled_when_confirmed_unloaded(self):
+        target = await self.backend.snapshot_ready()
+        self.tabby.unload_failures = 1
+        with self.assertRaises(UpstreamError):
+            await self.backend.release_gpu(target)
+        with self.assertRaises(UpstreamError):
+            await self.backend.observe_ready()
+        self.tabby.model = "inactive"
+        self.assertIsNone(await self.backend.observe_ready())
+        self.assertEqual(await self.backend.acquire_gpu(target), target)
 
     async def test_wrong_context_is_not_ready(self):
         target = await self.backend.snapshot_ready()

@@ -156,6 +156,7 @@ async def proxy_stream(
     raw_path: str | None = None,
     raw_query: str | None = None,
     body: bytes | None = None,
+    target: str = "upstream",
 ) -> web.StreamResponse:
     async with session.request(
         request.method,
@@ -164,6 +165,11 @@ async def proxy_stream(
         data=request_body(request) if body is None else body,
         allow_redirects=False,
     ) as upstream:
+        if upstream.status >= 400:
+            LOG.error(
+                "upstream request failed: target=%s method=%s path=%s status=%s",
+                target, request.method, request.path, upstream.status,
+            )
         downstream = web.StreamResponse(
             status=upstream.status,
             reason=upstream.reason,

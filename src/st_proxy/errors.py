@@ -10,6 +10,10 @@ class UpstreamError(BrokerError):
     """Raised when an upstream service fails."""
 
 
+class InsufficientVram(UpstreamError):
+    """A completed model load failed because the backend reported insufficient VRAM."""
+
+
 class HandoffError(BrokerError):
     """Raised when a GPU handoff cannot complete safely."""
 

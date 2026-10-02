@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import ClientError, ClientSession
 
+from ..errors import InsufficientVram
 from ..http import child_url
 from .base import BackendInfo, BackendTimeouts, RestorePoint, backend_error
 
@@ -15,6 +17,7 @@ _BUDGET_KEYS = (
 )
 _OUTPUT_KEYS = ("max_tokens", "max_completion_tokens", "max_length")
 _EFFORT_DIVISORS = {"minimal": 10, "low": 4, "medium": 2}
+LOG = logging.getLogger(__name__)
 
 
 def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -127,18 +130,38 @@ class TabbyApiBackend:
         # A lost load connection does not cancel TabbyAPI's detached load task.
         # Do not let a later 503 observation turn that into a successful release.
         self._uncertain = False
+        self._pending_load: TabbyApiRestorePoint | None = None
+        self._load_failed = False
 
     @property
     def info(self) -> BackendInfo:
         return self._info
 
-    def _require_certain(self) -> None:
-        if self._uncertain:
+    async def _observe_confirmed(
+        self, *, retry_failed_load: bool = False,
+    ) -> TabbyApiRestorePoint | None:
+        current = await self._observe()
+        if not self._uncertain:
+            return current
+        pending = self._pending_load
+        if current is None:
+            # A failed load may retain allocations. Only LLM acquisition can retry;
+            # do not grant ComfyUI a lease merely because no model is published.
+            confirmed = pending is None or (retry_failed_load and self._load_failed)
+        else:
+            confirmed = pending is not None and current.model == pending.model and all(
+                current.parameters.get(key) == value
+                for key, value in pending.parameters.items()
+            )
+        if not confirmed:
             raise backend_error(
                 self.info.label, "lifecycle confirmation",
-                "previous load/unload did not complete; backend state must be resolved "
-                "before restarting the proxy",
+                "load/unload is still unconfirmed; status will be checked on the next request",
             )
+        self._uncertain = False
+        self._pending_load = None
+        self._load_failed = False
+        return current
 
     async def _json(self, path: str, *, allow_unloaded: bool = False) -> Any:
         async with asyncio.timeout(self._timeouts.request):
@@ -190,18 +213,16 @@ class TabbyApiBackend:
         return TabbyApiRestorePoint(payload["id"], saved)
 
     async def observe_ready(self) -> TabbyApiRestorePoint | None:
-        self._require_certain()
         try:
-            return await self._observe()
+            return await self._observe_confirmed()
         except (ClientError, TimeoutError, ValueError) as exc:
             raise backend_error(self.info.label, "model observation", type(exc).__name__) from exc
 
     async def snapshot_ready(self) -> TabbyApiRestorePoint:
-        self._require_certain()
         try:
             async with asyncio.timeout(self._timeouts.acquire):
                 while True:
-                    observed = await self._observe()
+                    observed = await self._observe_confirmed()
                     if observed is not None:
                         return observed
                     await asyncio.sleep(self._timeouts.poll_interval)
@@ -214,11 +235,10 @@ class TabbyApiBackend:
         return target
 
     async def release_gpu(self, target: RestorePoint) -> None:
-        self._require_certain()
         restore = self._target(target)
         try:
             async with asyncio.timeout(self._timeouts.release):
-                current = await self._observe()
+                current = await self._observe_confirmed()
                 if current is None:
                     return
                 # Native model selection may have changed since the last lease.
@@ -226,6 +246,7 @@ class TabbyApiBackend:
                 restore.model = current.model
                 restore.parameters = current.parameters
                 self._uncertain = True
+                self._pending_load = None
                 async with self._session.post(
                     child_url(self.info.chat_origin, "/v1/model/unload"),
                 ) as response:
@@ -257,6 +278,8 @@ class TabbyApiBackend:
                 raise ValueError("expected load SSE")
             data: list[str] = []
             finished = False
+            failed = False
+            insufficient_vram = False
             async for raw_line in response.content:
                 line = raw_line.decode("utf-8").rstrip("\r\n")
                 if line.startswith("event:") and line[6:].strip() == "error":
@@ -266,34 +289,82 @@ class TabbyApiBackend:
                 elif not line and data:
                     event = json.loads("\n".join(data))
                     data.clear()
-                    if not isinstance(event, dict) or "error" in event:
-                        raise backend_error(self.info.label, "load", "invalid/error SSE event")
-                    if event.get("model_type") == "model" and event.get("status") == "finished":
+                    if not isinstance(event, dict):
+                        raise backend_error(self.info.label, "load", "invalid SSE event")
+                    if "error" in event:
+                        error = event["error"]
+                        if not isinstance(error, dict) or not isinstance(error.get("message"), str):
+                            raise backend_error(self.info.label, "load", "invalid SSE error")
+                        failed = True
+                        message = error["message"].lower()
+                        insufficient_vram = insufficient_vram or any(
+                            marker in message for marker in (
+                                "cuda out of memory", "cuda error: out of memory",
+                                "insufficient vram", "torch.cuda.outofmemoryerror",
+                            )
+                        )
+                        # Never print the raw backend message or traceback: either
+                        # may contain private paths, model names or request data.
+                        LOG.error(
+                            "%s load error: %s; waiting for load stream to end",
+                            self.info.label,
+                            "insufficient_vram (not enough GPU memory for model/cache)"
+                            if insufficient_vram else "backend reported a load failure",
+                        )
+                    elif failed:
+                        raise backend_error(self.info.label, "load", "progress after SSE error")
+                    elif event.get("model_type") == "model" and event.get("status") == "finished":
                         finished = True
-            if data or not finished:
+            if data or not (finished or failed):
                 raise backend_error(self.info.label, "load", "incomplete SSE response")
+            if failed:
+                # Only a well-formed terminal error AND a clean stream end prove
+                # the detached load stopped. Disconnect/timeout stays uncertain.
+                self._load_failed = True
+                if insufficient_vram:
+                    raise InsufficientVram(
+                        "TabbyAPI load failed: insufficient_vram "
+                        "(not enough GPU memory for model/cache); model is not ready; "
+                        "next active LLM request will retry"
+                    )
+                raise backend_error(
+                    self.info.label, "load",
+                    "backend reported a completed load failure; next LLM request may retry",
+                )
 
     async def acquire_gpu(self, target: RestorePoint | None) -> TabbyApiRestorePoint:
-        self._require_certain()
         restore = self._target(target) if target is not None else None
         # A first load can apply Tabby's model-local overrides to the fallback
         # context. Subsequent restores must match every saved setting exactly.
         expected_parameters = restore.parameters if restore is not None else {}
-        if restore is None:
-            if not self._model:
-                raise backend_error(
-                    self.info.label, "load", "no loaded model; configure --tabby-model",
-                )
-            restore = TabbyApiRestorePoint(self._model, {"max_seq_len": self._max_seq_len})
         try:
             async with asyncio.timeout(self._timeouts.acquire):
-                current = await self._observe()
+                current = await self._observe_confirmed(retry_failed_load=True)
+                if restore is None:
+                    # Cold recovery must retain a model selected natively in Tabby,
+                    # just like the coordinator's initial passive discovery.
+                    if current is not None:
+                        return current
+                    if not self._model:
+                        raise backend_error(
+                            self.info.label, "load", "no loaded model; configure --tabby-model",
+                        )
+                    restore = TabbyApiRestorePoint(
+                        self._model, {"max_seq_len": self._max_seq_len},
+                    )
                 if current is not None:
-                    if current.model == restore.model and current.parameters == restore.parameters:
+                    if current.model == restore.model and all(
+                        current.parameters.get(key) == value
+                        for key, value in expected_parameters.items()
+                    ):
                         return current
                     # TabbyAPI ignores changed load settings for an already loaded model.
                     await self.release_gpu(current)
                 self._uncertain = True
+                self._pending_load = TabbyApiRestorePoint(
+                    restore.model, dict(expected_parameters),
+                )
+                self._load_failed = False
                 await self._load(restore)
                 while True:
                     current = await self._observe()
@@ -306,6 +377,7 @@ class TabbyApiBackend:
                                 self.info.label, "load verification", "model/settings mismatch",
                             )
                         self._uncertain = False
+                        self._pending_load = None
                         return current
                     await asyncio.sleep(self._timeouts.poll_interval)
         except (ClientError, TimeoutError, ValueError) as exc:

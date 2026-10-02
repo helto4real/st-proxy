@@ -125,6 +125,7 @@ if [ "$check_backend" -eq 1 ]; then
 fi
 printf '%s|%s|%s\\n' "proxy" "$PWD" "$$" >> "$STACK_EVENT_LOG"
 printf '%s-child-log\\n' "proxy"
+printf '%s\\n' 'ERROR st_proxy: synthetic backend failure' >&2
 trap 'exit 0' INT TERM HUP
 while :; do sleep 1; done
 """
@@ -291,6 +292,7 @@ def test_start_order_working_directories_and_logging(
     assert "PocketTTS" not in output
     assert "AllTalk" not in output
     assert "proxy-child-log" in output
+    assert "ERROR st_proxy: synthetic backend failure" in output
     assert ("llm-child-log" in output) is show_logs
     assert "pockettts-child-log" not in output
 

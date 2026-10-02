@@ -12,7 +12,7 @@ from typing import Any
 
 from .comfy import ComfyClient
 from .config import BrokerConfig
-from .errors import ChatUnavailable, HandoffError, QueueFull
+from .errors import ChatUnavailable, HandoffError, InsufficientVram, QueueFull
 from .http import BufferedResponse
 from .llm import LlmBackend, RestorePoint
 
@@ -562,7 +562,7 @@ class HandoffCoordinator:
             self._resolve_image_error(work, "broker is shutting down")
             raise
         except Exception as exc:
-            LOG.warning("image handoff failed: %s", exc)
+            LOG.error("image handoff failed: %s", exc)
             error = str(exc) or type(exc).__name__
             errors.append(error)
             if self._owner is GpuOwner.COMFY and not self._closing:
@@ -707,6 +707,9 @@ class HandoffCoordinator:
             elif (
                 self._restore_point is None
                 and self._llm.info.kind in {"koboldcpp", "tabbyapi", "prism"}
+                # After a failed cold load, Tabby's acquisition path must reconcile
+                # lifecycle state; ordinary observation cannot authorize a retry.
+                and not (self._llm.info.kind == "tabbyapi" and self._recoverable_error)
             ):
                 observed = await self._llm.observe_ready()
                 if observed is not None:
@@ -721,7 +724,8 @@ class HandoffCoordinator:
             self._record_errors(errors)
             if not self._closing:
                 await self._mark_recoverable(
-                    f"{self._llm.info.label} is not confirmed ready"
+                    str(exc) if isinstance(exc, InsufficientVram)
+                    else f"{self._llm.info.label} is not confirmed ready"
                 )
             self._recovering = False
             return False

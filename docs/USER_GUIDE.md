@@ -739,6 +739,12 @@ Show child-process output:
 ./st-stack.zsh --log
 ```
 
+The proxy's own log is always shown, including without `--log`. Backend HTTP
+errors are logged at `ERROR` as soon as response headers arrive; connection,
+timeout and lifecycle failures are also logged at `ERROR` for every LLM backend.
+Raw backend bodies, tracebacks, credentials and prompts are not logged.
+`--log` additionally shows the underlying services' own output.
+
 Stop the supervised stack:
 
 ```bash
@@ -862,17 +868,44 @@ proxy can capture the new settings before its next handoff. Prompt templates and
 reasoning generation remain TabbyAPI responsibilities; the proxy only adapts
 request controls as described below.
 
-A failed or disconnected lifecycle operation leaves GPU ownership unconfirmed.
-TabbyAPI continues a load after its client disconnects, so a later “no model”
-response cannot clear that uncertainty. The adapter blocks further handoffs;
-resolve the backend's operation/resource state before restarting the proxy.
-It does not automatically restart services. Ordinary ComfyUI cleanup failures
-retain the existing retry-on-next-active-request behavior.
+A lifecycle failure leaves GPU ownership unconfirmed, but does not permanently
+disable status observation. Recovery is driven only by the next active request:
+
+- A structured load error followed by a clean end of the SSE response confirms
+  that the load attempt ended. If `/v1/model` confirms no model is loaded, the
+  next active LLM request may make one new load attempt after ComfyUI cleanup.
+  Repeated failures return errors; there is no background retry loop. The saved
+  model and settings are retained. A failed load alone does not grant ComfyUI a
+  lease because partial allocations may remain.
+- Explicit CUDA out-of-memory and insufficient-VRAM load errors are immediately
+  logged as `insufficient_vram`. After the load stream ends cleanly, the failed
+  request and broker status report that the model is not ready because there is
+  not enough GPU memory for the model/cache. The next active LLM request tries
+  loading again with the saved settings, allowing recovery after you free memory.
+  No retry occurs within the failed request or from passive metadata polling.
+  A memory-error event without a clean stream end remains unconfirmed, as below.
+- A timeout, broken stream, or malformed response does not confirm that loading
+  ended. TabbyAPI continues loading after a client disconnects. A later “no model”
+  response remains ambiguous and cannot authorize another load. If a subsequent
+  observation finds the expected model and saved settings ready, normal handoffs
+  resume without restarting the proxy or loading the model again.
+- An unconfirmed unload can be reconciled when `/v1/model` confirms it is unloaded.
+  Unreachable services and mismatched model/settings remain blocked.
+
+The proxy does not restart services or unload other GPU processes. An ambiguous
+load that never becomes ready still requires backend investigation. Ordinary
+ComfyUI cleanup failures retain the retry-on-next-active-request behavior.
 
 ComfyUI's `/free` response acknowledges a cleanup request, not completed GPU
-memory release. The proxy waits five seconds after a successful response before
-continuing LLM restoration. This fixed margin applies to all LLM backends and is
-included in the existing cleanup timeout; it does not verify that VRAM is free.
+memory release. All backends retain the five-second minimum wait after a
+successful response. For TabbyAPI, the proxy also waits for `/queue` to be idle
+before requesting cleanup, then requires an idle queue and two consecutive equal
+memory observations from `/system_stats`. These checks share the existing cleanup
+timeout; unavailable or invalid status prevents LLM loading. ComfyUI's reported
+free VRAM includes reclaimable Torch cache, so observations also account for
+driver-free memory separately. Stable values are a settling check, not proof that
+every model has been unloaded or that the next model will fit alongside other
+GPU processes. Queue contents and raw memory responses are not logged.
 
 ### Thinking controls for TabbyAPI chat
 

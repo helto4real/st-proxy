@@ -20,6 +20,9 @@ class MockTabby(MockKobold):
         self.loads: list[dict] = []
         self.unloads = 0
         self.load_error = False
+        self.load_error_message = "synthetic failure"
+        self.hold_error_stream = False
+        self.error_sent = asyncio.Event()
         self.load_finished = asyncio.Event()
         self.load_release = asyncio.Event()
         self.hold_load = False
@@ -71,7 +74,11 @@ class MockTabby(MockKobold):
         if self.hold_load:
             await self.load_release.wait()
         if self.load_error:
-            await response.write(b'data: {"error":{"message":"synthetic failure"}}\n\n')
+            event = json.dumps({"error": {"message": self.load_error_message}})
+            await response.write(f"data: {event}\n\n".encode())
+            self.error_sent.set()
+            if self.hold_error_stream:
+                await self.load_release.wait()
         else:
             self.model = payload["model_name"]
             self.parameters.update({

@@ -162,6 +162,8 @@ class ComfyClient:
         LOG.info("ComfyUI VRAM cleanup requested")
         try:
             async with asyncio.timeout(self._config.cleanup_timeout):
+                if self._config.llm_backend == "tabbyapi":
+                    await self._wait_for_idle()
                 async with self._session.post(
                     child_url(self._config.comfy_url, "/free"),
                     json={"unload_models": True, "free_memory": True},
@@ -178,8 +180,59 @@ class ComfyClient:
                     )
                 # /free acknowledges queued cleanup, not physical VRAM release.
                 await asyncio.sleep(5.0)
+                if self._config.llm_backend == "tabbyapi":
+                    await self._wait_for_memory_settled()
                 LOG.info("ComfyUI cleanup wait completed")
         except UpstreamError:
             raise
-        except (ClientError, TimeoutError) as exc:
+        except (ClientError, TimeoutError, ValueError) as exc:
             raise backend_error("ComfyUI", "model cleanup", type(exc).__name__) from exc
+
+    async def _cleanup_status(self, path: str) -> dict:
+        async with self._session.get(child_url(self._config.comfy_url, path)) as response:
+            if response.status != 200:
+                raise backend_error("ComfyUI", "cleanup observation", f"HTTP {response.status}")
+            payload = await response.json()
+        if not isinstance(payload, dict):
+            raise backend_error("ComfyUI", "cleanup observation", "invalid status")
+        return payload
+
+    async def _wait_for_idle(self) -> None:
+        while True:
+            queue = await self._cleanup_status("/queue")
+            running, pending = queue.get("queue_running"), queue.get("queue_pending")
+            if not isinstance(running, list) or not isinstance(pending, list):
+                raise backend_error("ComfyUI", "cleanup observation", "invalid queue status")
+            if not running and not pending:
+                return
+            await asyncio.sleep(self._config.poll_interval)
+
+    async def _wait_for_memory_settled(self) -> None:
+        previous = None
+        while True:
+            await self._wait_for_idle()
+            stats = await self._cleanup_status("/system_stats")
+            devices = stats.get("devices")
+            if not isinstance(devices, list) or not devices:
+                raise backend_error("ComfyUI", "cleanup observation", "missing memory status")
+            current = []
+            for device in devices:
+                if not isinstance(device, dict):
+                    raise backend_error("ComfyUI", "cleanup observation", "invalid device status")
+                values = tuple(device.get(key) for key in (
+                    "vram_total", "vram_free", "torch_vram_total", "torch_vram_free",
+                ))
+                if any(type(value) is not int or value < 0 for value in values):
+                    raise backend_error("ComfyUI", "cleanup observation", "invalid memory status")
+                total, free, reserved, reclaimable = values
+                if free > total or reclaimable > reserved or reclaimable > free:
+                    raise backend_error("ComfyUI", "cleanup observation", "invalid memory status")
+                # Comfy's vram_free includes its own reclaimable Torch cache.
+                # Observe driver-free memory as well; do not call that cache free
+                # for another process. Stable samples are not a model-fit guarantee.
+                current.append((total, free - reclaimable, reserved, reclaimable))
+            if current == previous:
+                LOG.info("ComfyUI queue idle and memory observations stable")
+                return
+            previous = current
+            await asyncio.sleep(self._config.poll_interval)

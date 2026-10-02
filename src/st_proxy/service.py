@@ -327,6 +327,7 @@ class BrokerService:
                     request,
                     self.chat_session,
                     self.llm.info.chat_origin,
+                    target=label,
                 )
             elif _is_passive_llm_metadata(request, self.llm.info.kind):
                 LOG.debug(
@@ -339,6 +340,7 @@ class BrokerService:
                             request,
                             self.chat_session,
                             self.llm.info.chat_origin,
+                            target=label,
                         )
                     else:
                         response = _inactive_llm_metadata(request.path, self.llm.info.kind)
@@ -360,6 +362,7 @@ class BrokerService:
                         request,
                         self.chat_session,
                         self.llm.info.chat_origin,
+                        target=label,
                         body=body,
                     )
             LOG.info(
@@ -372,7 +375,7 @@ class BrokerService:
             )
             return response
         except ChatUnavailable as exc:
-            LOG.warning(
+            LOG.error(
                 "request rejected: target=%s method=%s path=%s status=503 reason=%s "
                 "duration=%.3fs",
                 label,
@@ -383,7 +386,7 @@ class BrokerService:
             )
             return web.json_response({"error": str(exc)}, status=503)
         except (BrokerError, ClientError, TimeoutError) as exc:
-            LOG.warning(
+            LOG.error(
                 "request failed: target=%s method=%s path=%s status=502 "
                 "error=%s duration=%.3fs",
                 label,
@@ -411,7 +414,10 @@ class BrokerService:
         ):
             raise web.HTTPForbidden(text="model lifecycle is owned by the broker")
         if request.method in {"GET", "HEAD"} and path in {"/health", "/models", "/v1/models"}:
-            return await proxy_stream(request, self.chat_session, self.llm.info.chat_origin)
+            return await proxy_stream(
+                request, self.chat_session, self.llm.info.chat_origin,
+                target=self.llm.info.label,
+            )
         if request.method in {"GET", "HEAD"} and path in {"/props", "/metrics", "/slots"}:
             async with self.coordinator.passive_llm_metadata() as available:
                 assert isinstance(self.llm, PrismBackend)
@@ -422,6 +428,7 @@ class BrokerService:
                 return await proxy_stream(
                     request, self.chat_session, self.llm.info.chat_origin,
                     raw_query=request.rel_url.update_query(model=active.model).raw_query_string,
+                    target=self.llm.info.label,
                 )
         assert isinstance(self.llm, PrismBackend)
         body = await self._chat_body(request) if request.can_read_body else b""
@@ -472,6 +479,7 @@ class BrokerService:
             return await proxy_stream(
                 request, self.chat_session, self.llm.info.chat_origin, body=body,
                 raw_query=request.rel_url.update_query(model=target.model).raw_query_string,
+                target=self.llm.info.label,
             )
 
     async def _chat_body(self, request: web.Request) -> bytes:
@@ -495,11 +503,14 @@ class BrokerService:
                         try:
                             self._router_models = await self.llm.router_models()
                         except BrokerError:
-                            LOG.warning("router model discovery failed; retaining cached list")
+                            LOG.error("router model discovery failed; retaining cached list")
                     return web.json_response(self._router_models)
                 if not available:
                     return _inactive_llm_metadata(path)
-                return await proxy_stream(request, self.chat_session, self.llm.info.chat_origin)
+                return await proxy_stream(
+                    request, self.chat_session, self.llm.info.chat_origin,
+                    target=self.llm.info.label,
+                )
         if path.startswith("/api/admin/reload_config") or path == "/noscript":
             raise web.HTTPForbidden(text="model lifecycle is owned by the broker")
         abort = request.method == "POST" and path == ABORT_PATH
@@ -510,6 +521,7 @@ class BrokerService:
                 body = await self._chat_body(request) if request.can_read_body else b""
                 return await proxy_stream(
                     request, self.chat_session, self.llm.info.chat_origin, body=body,
+                    target=self.llm.info.label,
                 )
         if request.content_length is not None:
             if request.content_length > self.config.max_chat_body_bytes:
@@ -556,6 +568,7 @@ class BrokerService:
                 response = await proxy_stream(
                     request, self.chat_session, self.llm.info.chat_origin,
                     raw_path=path, body=body,
+                    target=self.llm.info.label,
                 )
                 if response.status >= 500:
                     await self.coordinator.router_request_failed()
@@ -676,7 +689,7 @@ class BrokerService:
                     headers={"Retry-After": "1"},
                 )
             except BrokerError as exc:
-                LOG.warning(
+                LOG.error(
                     "request rejected: target=ComfyUI method=%s path=%s status=503 "
                     "reason=%s duration=%.3fs",
                     request.method,
@@ -706,6 +719,7 @@ class BrokerService:
                         self.control_session,
                         self.config.comfy_url,
                         raw_path=upstream_raw_path,
+                        target="ComfyUI",
                     )
             else:
                 response = await proxy_stream(
@@ -713,6 +727,7 @@ class BrokerService:
                     self.image_session,
                     self.config.comfy_url,
                     raw_path=upstream_raw_path,
+                    target="ComfyUI",
                     body=buffered_body,
                 )
             request_log(
@@ -734,7 +749,7 @@ class BrokerService:
             )
             return web.json_response({"error": str(exc)}, status=409)
         except (BrokerError, ClientError, TimeoutError) as exc:
-            LOG.warning(
+            LOG.error(
                 "request failed: target=ComfyUI method=%s path=%s status=502 error=%s "
                 "duration=%.3fs",
                 request.method,

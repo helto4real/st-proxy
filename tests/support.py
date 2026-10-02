@@ -161,6 +161,8 @@ class MockComfy:
         app.router.add_get("/history/{prompt_id}", self.history)
         app.router.add_post("/history", self.delete_history)
         app.router.add_post("/free", self.free)
+        app.router.add_get("/queue", self.queue)
+        app.router.add_get("/system_stats", self.system_stats)
         app.router.add_post("/interrupt", self.interrupt)
         app.router.add_get("/ws", self.websocket)
         app.router.add_get("/userdata/{file}", self.userdata)
@@ -206,6 +208,20 @@ class MockComfy:
         payload = await request.json()
         self.history_deletes.append(list(payload.get("delete", [])))
         return web.json_response({})
+
+    async def queue(self, _request: web.Request) -> web.Response:
+        return web.json_response({
+            "queue_running": [
+                [key] for key, event in self.completion.items() if not event.is_set()
+            ],
+            "queue_pending": [],
+        })
+
+    async def system_stats(self, _request: web.Request) -> web.Response:
+        return web.json_response({"devices": [{
+            "vram_total": 24000, "vram_free": 22000,
+            "torch_vram_total": 0, "torch_vram_free": 0,
+        }]})
 
     async def free(self, request: web.Request) -> web.Response:
         assert await request.json() == {"unload_models": True, "free_memory": True}

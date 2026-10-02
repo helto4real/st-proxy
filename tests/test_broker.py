@@ -6,12 +6,14 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-from aiohttp import ClientSession
+from aiohttp import ClientConnectionError, ClientSession, web
 
 from st_proxy.config import BrokerConfig, TestEndpointRegistry
 from st_proxy.errors import ConfigurationError
+from st_proxy.llm.base import BackendInfo
 from st_proxy.service import BrokerService
 
 from .support import DynamicServer, MockComfy, MockKobold, prompt_payload, wait_until
@@ -275,6 +277,79 @@ class BrokerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("query-secret", logs)
         self.assertNotIn("body-secret", logs)
         self.assertNotIn("SyntheticNode", logs)
+
+    async def test_all_backend_http_errors_are_logged_before_body_finishes(self) -> None:
+        # Establish a lease so Kobold's passive metadata reaches the upstream.
+        async with self.client.post(self.chat_url + "/v1/chat/completions", json={}) as response:
+            await response.read()
+        release = asyncio.Event()
+
+        async def fail(request):
+            response = web.StreamResponse(status=503, headers={"X-Test": "preserved"})
+            await response.prepare(request)
+            await release.wait()
+            await response.write(b'{"error":"private upstream response"}')
+            await response.write_eof()
+            return response
+
+        app = web.Application()
+        app.router.add_get("/v1/models", fail)
+        server = DynamicServer(app)
+        origin = await server.start()
+        self.registry.approve_disposable(origin)
+        try:
+            for kind, label in (
+                ("koboldcpp", "KoboldCpp"), ("tabbyapi", "TabbyAPI"),
+                ("ollama", "Ollama"), ("prism", "Prism"),
+            ):
+                with self.subTest(backend=kind):
+                    release.clear()
+                    backend = SimpleNamespace(info=BackendInfo(kind, label, origin))
+                    with (
+                        patch.object(self.service, "llm", backend),
+                        self.assertLogs("st_proxy", level="ERROR") as captured,
+                    ):
+                        async with self.client.get(
+                            self.chat_url + "/v1/models?key=query-secret",
+                            headers={"Authorization": "header-secret"},
+                        ) as response:
+                            self.assertEqual(response.status, 503)
+                            self.assertEqual(response.headers["X-Test"], "preserved")
+                            logs = "\n".join(captured.output)
+                            self.assertIn(f"target={label}", logs)
+                            self.assertIn("status=503", logs)
+                            self.assertNotIn("secret", logs)
+                            release.set()
+                            self.assertEqual(
+                                await response.read(), b'{"error":"private upstream response"}',
+                            )
+                        self.assertNotIn("private", "\n".join(captured.output))
+        finally:
+            release.set()
+            await server.close()
+
+    async def test_all_backend_transport_errors_are_logged_at_error_level(self) -> None:
+        async with self.client.post(self.chat_url + "/v1/chat/completions", json={}) as response:
+            await response.read()
+        for kind, label in (
+            ("koboldcpp", "KoboldCpp"), ("tabbyapi", "TabbyAPI"),
+            ("ollama", "Ollama"), ("prism", "Prism"),
+        ):
+            with self.subTest(backend=kind):
+                backend = SimpleNamespace(info=BackendInfo(kind, label, self.kobold_server.url))
+                with (
+                    patch.object(self.service, "llm", backend),
+                    patch("st_proxy.service.proxy_stream", new=AsyncMock(
+                        side_effect=ClientConnectionError("private URL and credentials"),
+                    )),
+                    self.assertLogs("st_proxy", level="ERROR") as captured,
+                ):
+                    async with self.client.get(self.chat_url + "/v1/models") as response:
+                        self.assertEqual(response.status, 502)
+                logs = "\n".join(captured.output)
+                self.assertIn(f"target={label}", logs)
+                self.assertIn("ClientConnectionError", logs)
+                self.assertNotIn("private", logs)
 
     async def test_routine_comfy_polling_is_debug_only(self) -> None:
         with self.assertLogs("st_proxy.service", level="DEBUG") as captured:

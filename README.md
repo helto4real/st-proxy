@@ -383,7 +383,10 @@ does not log query strings, request or response bodies, model names, prompts,
 generated content, or authorization values. ComfyUI confirms that `/free`
 completed but does not report an exact number of bytes freed.
 High-frequency successful ComfyUI `GET /history` polling is logged only at
-`DEBUG`; failures remain visible at `WARNING`.
+`DEBUG`; upstream HTTP and transport failures are logged at `ERROR`. For all LLM
+backends, HTTP errors are logged as soon as their response headers arrive, without
+logging response bodies. The proxy's log is visible in `st-stack.zsh` even without
+`--log`; that flag additionally shows the underlying services' own output.
 
 The broker enforces logical GPU ownership through verified application
 lifecycle APIs; it is not a kernel GPU access-control layer. For a hard
