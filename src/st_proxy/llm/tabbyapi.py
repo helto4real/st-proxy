@@ -189,6 +189,18 @@ class TabbyApiBackend:
         except (ClientError, TimeoutError, ValueError) as exc:
             raise backend_error(self.info.label, "API check", type(exc).__name__) from exc
 
+    async def available_models(self) -> dict[str, Any]:
+        try:
+            payload = await self._json("/v1/model/list")
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                raise ValueError("invalid model list")
+            if any(not isinstance(card, dict) or not isinstance(card.get("id"), str)
+                   or not card["id"] for card in payload["data"]):
+                raise ValueError("invalid model ID")
+            return payload
+        except (ClientError, TimeoutError, ValueError) as exc:
+            raise backend_error(self.info.label, "model discovery", type(exc).__name__) from exc
+
     async def _observe(self) -> TabbyApiRestorePoint | None:
         payload = await self._json("/v1/model", allow_unloaded=True)
         if payload is None:

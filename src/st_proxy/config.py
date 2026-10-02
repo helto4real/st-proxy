@@ -66,6 +66,8 @@ class BrokerConfig:
     image_port: int = 8188
     llm_backend: str = "koboldcpp"
     llm_url: str = ""
+    tabby_url: str = "http://127.0.0.1:5003"
+    prism_url: str = "http://127.0.0.1:5006"
     kobold_url: InitVar[str | None] = None
     comfy_url: str = "http://127.0.0.1:8189"
     kobold_admin_password: str | None = None
@@ -107,6 +109,10 @@ class BrokerConfig:
                 raise ConfigurationError("llm_url and kobold_url cannot disagree")
         llm_url = kobold_url or self.llm_url or backend_default_origin(self.llm_backend)
         object.__setattr__(self, "llm_url", normalize_origin(llm_url))
+        for name in ("tabby_url", "prism_url"):
+            object.__setattr__(self, name, normalize_origin(getattr(self, name)))
+        if self.llm_backend == "all" and len({self.llm_url, self.tabby_url, self.prism_url}) != 3:
+            raise ConfigurationError("all backends require distinct upstream origins")
         object.__setattr__(self, "comfy_url", normalize_origin(self.comfy_url))
         if not 0 <= self.chat_port <= 65535 or not 0 <= self.image_port <= 65535:
             raise ConfigurationError("listen ports must be between 0 and 65535")
@@ -145,7 +151,10 @@ class BrokerConfig:
                 raise ConfigurationError("test mode requires dynamically allocated broker ports")
             if self.test_registry is None:
                 raise ConfigurationError("test mode requires a process-local endpoint registry")
-            for origin in (self.llm_url, self.comfy_url):
+            origins = [self.llm_url, self.comfy_url]
+            if self.llm_backend == "all":
+                origins.extend((self.tabby_url, self.prism_url))
+            for origin in origins:
                 if not self.test_registry.contains(origin):
                     raise ConfigurationError("test mode rejected an unregistered upstream endpoint")
 
@@ -158,6 +167,8 @@ class BrokerConfig:
         llm_backend: str = "koboldcpp",
         comfy_url: str,
         registry: TestEndpointRegistry,
+        tabby_url: str = "http://127.0.0.1:5003",
+        prism_url: str = "http://127.0.0.1:5006",
         **overrides: object,
     ) -> BrokerConfig:
         selected_llm_url = llm_url or kobold_url
@@ -168,6 +179,8 @@ class BrokerConfig:
             image_port=0,
             llm_backend=llm_backend,
             llm_url=selected_llm_url,
+            tabby_url=tabby_url,
+            prism_url=prism_url,
             comfy_url=comfy_url,
             test_mode=True,
             test_registry=registry,

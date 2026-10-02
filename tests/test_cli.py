@@ -30,6 +30,23 @@ def test_default_cli_uses_koboldcpp_compatibility_defaults() -> None:
     assert config.max_chat_body_bytes == 32 * 1024**2
 
 
+def test_all_mode_has_independent_engine_origins() -> None:
+    config = _parse("--llm-backend", "all", "--llm-url", "http://127.0.0.1:6001",
+                    "--tabby-url", "http://127.0.0.1:6003",
+                    "--prism-url", "http://127.0.0.1:6006")
+    assert config.llm_backend == "all"
+    assert config.llm_url == "http://127.0.0.1:6001"
+    assert config.tabby_url == "http://127.0.0.1:6003"
+    assert config.prism_url == "http://127.0.0.1:6006"
+    assert not config.kobold_router_mode
+    with patch.dict(os.environ, {"ST_PROXY_LLM_BACKEND": "all",
+                                "ST_PROXY_TABBY_URL": "http://127.0.0.1:7003",
+                                "ST_PROXY_PRISM_URL": "http://127.0.0.1:7006"}, clear=True):
+        config = config_from_args(build_parser().parse_args(()))
+        assert config.tabby_url == "http://127.0.0.1:7003"
+        assert config.prism_url == "http://127.0.0.1:7006"
+
+
 def test_router_options_and_environment_map_to_config() -> None:
     config = _parse("--kobold-router-mode", "--kobold-model-cache", "/tmp/models.json",
                     "--max-chat-body-bytes", "4096")

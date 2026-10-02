@@ -678,7 +678,8 @@ that route to the GPU-sensitive policy before using it alongside the LLM.
 
 The repository includes `st-stack.zsh`, a Linux/Zsh supervisor tailored to the
 repository owner's local multi-service setup. It can supervise a configured
-LLM and the proxy. It does not manage PocketTTS, SillyTavern, AllTalk, or ComfyUI.
+LLM, or all three engines, and the proxy. It does not manage PocketTTS,
+SillyTavern, AllTalk, or ComfyUI.
 
 This script is not a portable default installation:
 
@@ -699,6 +700,10 @@ After adapting it to your environment:
 ```bash
 ./st-stack.zsh
 ```
+
+Choose **1) KoboldCpp**, **2) TabbyAPI**, or **3) Prism** for the existing
+single-engine flow. Press **Enter** to start all three; see
+[all-backend mode](#all-backend-mode).
 
 The interactive KoboldCpp list displays paths relative to `models` and omits
 the `.kcpps` extension. It does not offer or enable automatic idle restoration.
@@ -788,10 +793,74 @@ Safe stop:
 Press Ctrl+C in the proxy terminal.
 ```
 
+## All-backend mode
+
+Press Enter at the stack's backend menu, or run:
+
+```bash
+ST_PROXY_LLM_BACKEND=all ./st-stack.zsh
+```
+
+The stack starts and supervises KoboldCpp, TabbyAPI and Prism with independent
+process groups. Ctrl-C and `--stop` stop all three and the proxy. Choices 1–3
+retain their single-backend behavior. ComfyUI remains separately managed.
+
+Connect the client to `http://127.0.0.1:5002/v1`. `/v1/models` combines
+KoboldCpp's native router profiles, TabbyAPI's `/v1/model/list`, and Prism's
+native router presets. It does not scan model files or guess compatible
+formats. IDs are namespaced, for example `koboldcpp/example.kcpps`,
+`tabbyapi/example-exl3` and `prism/example-preset`. Use the exact returned ID
+in each model-dependent request; there is no implicit engine when `model` is
+missing. The prefix is removed before forwarding to the native API. Responses,
+including SSE and reasoning content, retain the native format.
+
+Discovery is passive, including while ComfyUI runs. An unavailable catalog
+returns an upstream error instead of presenting an incomplete list as complete.
+Native listing permissions still apply; TabbyAPI must expose its full catalog
+to the proxy's existing local control connection. Listed models can still fail
+to load if their configuration or available VRAM is insufficient.
+
+All active model requests share the ComfyUI FIFO. Before switching engines,
+the current response drains, the old engine confirms release, and only then
+does the selected engine load or reserve its requested model. Same-model
+requests reuse the loaded model. TabbyAPI's observed load parameters are saved
+per model; unseen models use its native load defaults and model-local profiles.
+Its existing reasoning-effort translation is also preserved. A failed or
+unconfirmed load/unload blocks handoff to another engine or ComfyUI.
+ComfyUI queue and memory-settling checks also apply in all mode. No idle timer,
+catalog read or completed workflow restores a model in the background.
+
+KoboldCpp runs in Router mode and exposes the configured `.kcpps` profiles.
+`ST_STACK_KOBOLD_CONFIG` still selects its initial profile; when unset, all mode
+uses the first discovered profile without another prompt. TabbyAPI starts with
+empty `--model-name` and `--embedding-model-name` overrides so it does not
+compete for VRAM at startup; its configuration file is unchanged. Prism keeps
+its existing router requirements: `--models-max 1`, `--no-models-autoload`, and
+`load-on-startup = false`. Already running services are reused and their
+model state is reconciled on the first active proxy request.
+
+For all mode, upstream origins are configured with `ST_PROXY_LLM_URL`
+(KoboldCpp, stack default `http://127.0.0.1:5001`), `ST_PROXY_TABBY_URL`
+(`http://127.0.0.1:5003`) and `ST_PROXY_PRISM_URL`
+(`http://127.0.0.1:5006`). Optional per-engine launcher overrides are
+`ST_STACK_KOBOLDCPP_DIR` / `ST_STACK_KOBOLDCPP_COMMAND`,
+`ST_STACK_TABBYAPI_DIR` / `ST_STACK_TABBYAPI_COMMAND`, and
+`ST_STACK_PRISM_DIR` / `ST_STACK_PRISM_COMMAND`. Custom commands must preserve
+the corresponding native lifecycle contract and accept the Tabby startup
+overrides. The generic `ST_STACK_LLM_DIR` and `ST_STACK_LLM_COMMAND` remain
+single-engine settings.
+
+To start only the proxy against existing services, use `--llm-backend all`,
+`--llm-url`, `--tabby-url` and `--prism-url`. Set listener ports explicitly when
+using the stack port layout. `/broker/status` includes `active_llm_backend`
+and the namespaced `active_model`; `llm_reserved` denotes the shared reservation,
+including native KoboldCpp inline loading. Lifecycle/admin routes and
+`reload` / `autoload` query overrides cannot bypass that reservation.
+
 ## TabbyAPI / ExLlamaV3
 
 Choose TabbyAPI in the stack's first menu, or set `ST_PROXY_LLM_BACKEND=tabbyapi`.
-Enter selects KoboldCpp. `--stop` skips the menu and remembers the supervised
+Enter starts all three engines. `--stop` skips the menu and remembers the supervised
 backend choice. The existing KoboldCpp configuration selection and Router mode
 are unchanged. Ollama remains available through its existing environment setting.
 

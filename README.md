@@ -7,9 +7,17 @@ while the real applications listen on different loopback ports behind it.
 Supported LLM backends:
 
 - KoboldCpp, controlled through Model Administration.
+- TabbyAPI, controlled through its native model load/unload API.
 - Ollama, controlled through `/api/ps` and the `keep_alive` lifecycle API.
 - Prism, controlled through the native llama-server router load/unload API.
   Choose **3) Prism** in `st-stack.zsh`; see [Prism setup](docs/USER_GUIDE.md#prism--ternary-bonsai).
+
+In `st-stack.zsh`, **Enter starts KoboldCpp, TabbyAPI and Prism together**;
+choices **1–3** still select a single engine. All mode publishes their native
+model catalogs through one `/v1/models`, using `koboldcpp/…`, `tabbyapi/…` and
+`prism/…` IDs. Select an exact returned ID in the client. One shared FIFO keeps
+model loading, complete streamed responses and ComfyUI workflows mutually
+exclusive on the GPU. See [all-backend setup](docs/USER_GUIDE.md#all-backend-mode).
 
 New to the project? Start with the illustrated
 [user guide](docs/USER_GUIDE.md). The gateway and lease boundaries are described

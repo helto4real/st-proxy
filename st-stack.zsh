@@ -53,6 +53,13 @@ configure_llm_backend() {
             LLM_DEFAULT_DIR="${HOME}"
             LLM_DEFAULT_COMMAND="ollama serve"
             ;;
+        all)
+            LLM_LABEL="all LLM backends"
+            LLM_DEFAULT_URL="http://127.0.0.1:5001"
+            LLM_DEFAULT_DIR="${SCRIPT_DIR}"
+            LLM_DEFAULT_COMMAND="${PROXY_COMMAND}"
+            export ST_PROXY_KOBOLD_ROUTER_MODE=false
+            ;;
         *)
             LLM_LABEL="${LLM_BACKEND}"
             ;;
@@ -92,6 +99,39 @@ configure_llm_backend() {
 
 }
 
+# Run existing single-engine lifecycle helpers in an isolated configuration.
+# Each engine has its own process-group record, including during --stop.
+with_llm_backend() (
+    LLM_BACKEND=$1
+    shift
+    OWNS_LOCK=0
+    local prefix="ST_STACK_${LLM_BACKEND:u}"
+    local directory_key="${prefix}_DIR" command_key="${prefix}_COMMAND"
+    unset ST_STACK_LLM_DIR ST_STACK_LLM_COMMAND
+    [[ -n "${(P)directory_key:-}" ]] && export ST_STACK_LLM_DIR="${(P)directory_key}"
+    [[ -n "${(P)command_key:-}" ]] && export ST_STACK_LLM_COMMAND="${(P)command_key}"
+    case "${LLM_BACKEND}" in
+        koboldcpp)
+            export ST_PROXY_LLM_URL="${ST_PROXY_LLM_URL:-${ST_PROXY_KOBOLD_URL:-http://127.0.0.1:5001}}"
+            export ST_PROXY_KOBOLD_ROUTER_MODE=true
+            ;;
+        tabbyapi) export ST_PROXY_LLM_URL="${ST_PROXY_TABBY_URL:-http://127.0.0.1:5003}" ;;
+        prism) export ST_PROXY_LLM_URL="${ST_PROXY_PRISM_URL:-http://127.0.0.1:5006}" ;;
+    esac
+    configure_llm_backend || return 1
+    if [[ "${LLM_URL}" =~ '^https?://[^/:]+:([0-9]+)(/.*)?$' ]]; then
+        LLM_PORT=${match[1]}
+    else
+        log "backend URL must include http(s), a host and an explicit port"
+        return 2
+    fi
+    if [[ "${LLM_BACKEND}" == tabbyapi ]]; then
+        # Native CLI overrides apply only to this launch, never to config.yml.
+        LLM_COMMAND+=(--model-name "" --embedding-model-name "")
+    fi
+    "$@"
+)
+
 typeset -gr RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 typeset -gr RUNTIME_DIR="${RUNTIME_BASE}/st-stack-${UID}"
 typeset -gr KOBOLD_MODEL_CACHE="${RUNTIME_DIR}/kobold-models.json"
@@ -104,6 +144,7 @@ typeset -gi OWNS_LOCK=0
 typeset -gi CLEANUP_STARTED=0
 typeset -gi SHUTDOWN_REQUESTED=0
 typeset -gi RUNTIME_ACTIVE=0
+typeset -gi ALL_BACKENDS=0
 typeset -g START_TIMEOUT="${ST_STACK_START_TIMEOUT:-60}"
 typeset -g STOP_TIMEOUT="${ST_STACK_STOP_TIMEOUT:-10}"
 typeset -g PROXY_CHAT_PORT="${ST_PROXY_CHAT_PORT:-5002}"
@@ -172,6 +213,7 @@ parse_args() {
         return 2
     fi
     configure_llm_backend
+    [[ "${LLM_BACKEND}" == all ]] && ALL_BACKENDS=1
 
     if [[ -z "${LLM_BACKEND}" || -z "${LLM_URL}" || -z "${LLM_DIR}" || -z "${LLM_COMMAND_NAME}" ]]; then
         log "LLM backend, URL, directory and command must be configured"
@@ -269,6 +311,8 @@ configure_kobold_command() {
 
     if [[ -n "${KOBOLD_CONFIG_SETTING}" ]]; then
         resolve_configured_kobold_config || return 1
+    elif (( ALL_BACKENDS )); then
+        KOBOLD_SELECTED_CONFIG=${KOBOLD_CONFIG_FILES[1]}
     else
         prompt_for_kobold_config || return 1
     fi
@@ -394,6 +438,13 @@ service_running() {
 }
 
 llm_ready() {
+    if [[ "${LLM_BACKEND}" == all ]]; then
+        local engine
+        for engine in koboldcpp tabbyapi prism; do
+            with_llm_backend "${engine}" llm_ready || return 1
+        done
+        return 0
+    fi
     [[ -x "${PROXY_PATH}" ]] || return 1
     "${PROXY_PATH}" \
         --check-backend \
@@ -437,7 +488,11 @@ broker_status_is_healthy() {
 }
 
 pgid_file() {
-    REPLY="${RUNTIME_DIR}/$1.pgid"
+    if [[ "$1" == llm ]] && (( ALL_BACKENDS )); then
+        REPLY="${RUNTIME_DIR}/llm-${LLM_BACKEND}.pgid"
+    else
+        REPLY="${RUNTIME_DIR}/$1.pgid"
+    fi
 }
 
 record_managed_group() {
@@ -587,6 +642,14 @@ launch_in_directory() {
 ensure_service_started() {
     local service=$1
 
+    if [[ "${service}" == llm && "${LLM_BACKEND}" == all ]]; then
+        local engine
+        for engine in koboldcpp tabbyapi prism; do
+            with_llm_backend "${engine}" ensure_service_started llm || return 1
+        done
+        return 0
+    fi
+
     if [[ "${service}" == llm ]] && llm_ready; then
         log "${LLM_LABEL} is already reachable at ${LLM_URL}"
         return 0
@@ -634,6 +697,8 @@ ensure_service_started() {
             launch_in_directory proxy "${SCRIPT_DIR}" 0 "${PROXY_COMMAND}" \
                 --llm-backend "${LLM_BACKEND}" \
                 --llm-url "${LLM_URL}" \
+                --tabby-url "${ST_PROXY_TABBY_URL:-http://127.0.0.1:5003}" \
+                --prism-url "${ST_PROXY_PRISM_URL:-http://127.0.0.1:5006}" \
                 --comfy-url "${COMFY_URL}" \
                 --chat-port "${PROXY_CHAT_PORT}" \
                 --image-port "${PROXY_IMAGE_PORT}" \
@@ -781,6 +846,14 @@ clear_service_state() {
 stop_service() {
     local service=$1
     local deadline pid
+
+    if [[ "${service}" == llm && "${LLM_BACKEND}" == all ]]; then
+        local engine result=0
+        for engine in koboldcpp tabbyapi prism; do
+            with_llm_backend "${engine}" stop_service llm || result=1
+        done
+        return ${result}
+    fi
 
     collect_service_targets "${service}"
     if (( ${#TARGET_PIDS} == 0 && ${#TARGET_PGIDS} == 0 )); then
@@ -1004,13 +1077,14 @@ main() {
     elif [[ -z "${ST_PROXY_LLM_BACKEND:-}" ]]; then
         local choice
         while true; do
-            print -nru2 -- "Select LLM backend: 1) KoboldCpp  2) TabbyAPI  3) Prism [1]: "
-            IFS= read -r choice || choice=1
+            print -nru2 -- "Select LLM backend: 1) KoboldCpp  2) TabbyAPI  3) Prism [Enter: all]: "
+            IFS= read -r choice || choice=""
             case "${choice}" in
-                ""|1) LLM_BACKEND=koboldcpp; break ;;
+                "") LLM_BACKEND=all; break ;;
+                1) LLM_BACKEND=koboldcpp; break ;;
                 2) LLM_BACKEND=tabbyapi; break ;;
                 3) LLM_BACKEND=prism; break ;;
-                *) log "enter 1, 2 or 3" ;;
+                *) log "enter 1, 2, 3 or leave empty for all" ;;
             esac
         done
     fi

@@ -18,6 +18,7 @@ from .http import BufferedResponse, proxy_stream, proxy_websocket, upstream_requ
 from .kobold_router import ABORT_PATH, TEXT_PATHS, default_model_body, read_model_cache
 from .llm import LlmBackend, build_llm_backend
 from .llm.koboldcpp import KoboldCppBackend
+from .llm.multi import MultiBackend, MultiTarget
 from .llm.prism import PrismBackend, PrismRestorePoint
 from .llm.tabbyapi import adapt_chat_request
 
@@ -268,6 +269,10 @@ class BrokerService:
                 "websocket_connection_limit": WEBSOCKET_CONNECTION_LIMIT,
             }
         )
+        if isinstance(self.llm, MultiBackend):
+            active = self.llm.active
+            status["active_llm_backend"] = active.engine if active else None
+            status["active_model"] = f"{active.engine}/{active.model}" if active else None
         return web.json_response(status)
 
     async def _submit_image_until_disconnect(
@@ -318,7 +323,9 @@ class BrokerService:
             request.path,
         )
         try:
-            if self.config.kobold_router_mode:
+            if isinstance(self.llm, MultiBackend):
+                response = await self._multi_handler(request)
+            elif self.config.kobold_router_mode:
                 response = await self._router_handler(request)
             elif self.llm.info.kind == "prism":
                 response = await self._prism_handler(request)
@@ -399,6 +406,114 @@ class BrokerService:
                 {"error": f"{label} upstream request failed"},
                 status=502,
             )
+
+    async def _multi_handler(self, request: web.Request) -> web.StreamResponse:
+        assert isinstance(self.llm, MultiBackend)
+        assert self.coordinator is not None and self.chat_session is not None
+        path = request.path.rstrip("/")
+        if ("autoload" in request.query or "reload" in request.query
+                or path.startswith(("/api/admin/", "/models/", "/v1/model/"))
+                or path == "/noscript"):
+            raise web.HTTPForbidden(text="model lifecycle is owned by the broker")
+        if request.method in {"GET", "HEAD"} and path in {"/v1/models", "/models"}:
+            return web.json_response(await self.llm.model_catalog())
+        if request.method in {"GET", "HEAD"} and path == "/health":
+            return await self._status()
+        body = await self._chat_body(request) if request.can_read_body else b""
+        try:
+            payload = json.loads(body) if body else None
+            if payload is not None and not isinstance(payload, dict):
+                raise ValueError
+        except (ValueError, UnicodeError, RecursionError):
+            raise web.HTTPBadRequest(text="expected a JSON object") from None
+        model = payload.get("model") if payload is not None else request.query.get("model")
+        query_model = request.query.get("model")
+        if query_model is not None and payload is not None and query_model != model:
+            raise web.HTTPBadRequest(text="conflicting body and query model IDs")
+        abort = request.method == "POST" and path == ABORT_PATH
+        if model is None and (abort or request.method in {"GET", "HEAD", "OPTIONS"}):
+            target = self.llm.active
+            if target is None:
+                raise ChatUnavailable("no active model")
+        else:
+            try:
+                target = await self.llm.request_target(model)
+            except ValueError as exc:
+                raise web.HTTPBadRequest(text=str(exc)) from None
+        backend = self.llm.backends[target.engine]
+        if payload is not None:
+            payload["model"] = target.model
+            body = json.dumps(payload, ensure_ascii=False).encode()
+        query = request.rel_url.update_query(model=target.model).raw_query_string
+        if request.method in {"GET", "HEAD", "OPTIONS"} or abort:
+            if abort and target.engine != "koboldcpp":
+                raise web.HTTPNotFound()
+            async with self.coordinator.router_control(abort=abort) as available:
+                if not available or self.llm.active != target:
+                    raise ChatUnavailable("requested model is not active")
+                return await proxy_stream(
+                    request, self.chat_session, backend.info.chat_origin,
+                    body=body, raw_query=query, target=backend.info.label,
+                )
+        # Model-dependent API calls are admitted; lifecycle routes cannot acquire
+        # arbitrary extra models outside the shared GPU reservation.
+        active_paths = set(TEXT_PATHS)
+        if target.engine == "prism":
+            active_paths.update({"/completion", "/tokenize", "/detokenize", "/apply-template",
+                                 "/v1/embeddings", "/embeddings", "/rerank", "/v1/rerank"})
+        if request.method != "POST" or path not in active_paths:
+            raise web.HTTPForbidden(text="unsupported model request in all-backend mode")
+        if payload is None:
+            raise web.HTTPBadRequest(text="expected a JSON object with model")
+        if target.engine == "tabbyapi" and path == "/v1/chat/completions":
+            body = adapt_chat_request(body)
+        if len(body) > self.config.max_chat_body_bytes:
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=self.config.max_chat_body_bytes, actual_size=len(body))
+        acquired = asyncio.Event()
+        task = asyncio.create_task(self._multi_chat(request, target, body, acquired))
+        try:
+            while not task.done() and not acquired.is_set():
+                if request.transport is None or request.transport.is_closing():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    return web.Response(status=499)
+                await asyncio.wait({task}, timeout=0.05)
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def _multi_chat(
+        self, request: web.Request, target: MultiTarget, body: bytes, acquired: asyncio.Event,
+    ) -> web.StreamResponse:
+        assert isinstance(self.llm, MultiBackend)
+        assert self.coordinator is not None and self.chat_session is not None
+        backend = self.llm.backends[target.engine]
+        async with self.coordinator.chat_lease(target):
+            acquired.set()
+            if request.transport is None or request.transport.is_closing():
+                return web.Response(status=499)
+            path = request.path.rstrip("/")
+            if target.engine == "koboldcpp":
+                path = TEXT_PATHS.get(path, path)
+            try:
+                response = await proxy_stream(
+                    request, self.chat_session, backend.info.chat_origin, body=body,
+                    raw_path=path,
+                    raw_query=request.rel_url.update_query(model=target.model).raw_query_string,
+                    target=backend.info.label,
+                )
+                if target.engine == "koboldcpp" and response.status >= 500:
+                    self.llm.request_failed(target)
+                    await self.coordinator.router_request_failed()
+                return response
+            except BaseException:
+                if target.engine == "koboldcpp":
+                    self.llm.request_failed(target)
+                    await self.coordinator.router_request_failed()
+                raise
 
     async def _prism_handler(self, request: web.Request) -> web.StreamResponse:
         assert self.coordinator is not None and self.chat_session is not None

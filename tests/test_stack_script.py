@@ -115,7 +115,14 @@ if [ "$check_backend" -eq 1 ]; then
         exit
     fi
     [ -f "$STACK_EVENT_LOG" ] || exit 1
-    pid=$(awk -F '|' '$1 == "llm" { pid = $3 } END { print pid }' "$STACK_EVENT_LOG")
+    suffix=
+    case "$llm_url" in
+        *:5003) suffix=/tabby ;;
+        *:5006) suffix=/prism ;;
+    esac
+    pid=$(awk -F '|' -v suffix="$suffix" \\
+        '$1 == "llm" && (suffix == "" || index($2, suffix)) { pid = $3 } \\
+        END { print pid }' "$STACK_EVENT_LOG")
     [ -n "$pid" ] || exit 1
     state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
     case "$state" in
@@ -759,3 +766,57 @@ def test_backend_selection_and_existing_start_flow(
     assert "Select configuration" not in output
     assert ("Select LLM backend" in output) is interactive
     assert any(service == "llm" and cwd == backend_dir for service, cwd, _pid in events)
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+def test_all_backends_start_stop_and_keep_separate_process_groups(fake_stack, interactive):
+    for directory in ("tabby", "prism"):
+        backend_dir = fake_stack.home / "git" / directory
+        _write_executable(backend_dir / "start.sh",
+                          (fake_stack.llm_dir / "start_HQ.sh").read_text())
+        if directory == "prism":
+            _write_executable(backend_dir / "llama-server",
+                              (fake_stack.llm_dir / "start_HQ.sh").read_text())
+            _write_executable(backend_dir / "start.sh", "#!/bin/sh\nexec ./llama-server\n")
+    config = fake_stack.llm_dir / "models" / "alpha.kcpps"
+    config.parent.mkdir()
+    config.write_text("{}\n")
+    for key in ("ST_PROXY_LLM_BACKEND", "ST_STACK_LLM_COMMAND", "ST_STACK_LLM_DIR"):
+        fake_stack.env.pop(key, None)
+    if not interactive:
+        fake_stack.env["ST_PROXY_LLM_BACKEND"] = "all"
+    supervisor = fake_stack.start(stdin_data="\n" if interactive else None)
+    try:
+        events = fake_stack.wait_for_services(supervisor, {"llm", "proxy"}, timeout=12)
+        llms = [(cwd, pid) for service, cwd, pid in events if service == "llm"]
+        assert {cwd for cwd, _ in llms} == {
+            fake_stack.llm_dir, fake_stack.home / "git" / "tabby",
+            fake_stack.home / "git" / "prism",
+        }
+        runtime = fake_stack.runtime / f"st-stack-{os.getuid()}"
+        assert (runtime / "llm-backend").read_text().strip() == "all"
+        for engine in ("koboldcpp", "tabbyapi", "prism"):
+            assert (runtime / f"llm-{engine}.pgid").exists()
+        proxy_pid = next(pid for service, _, pid in events if service == "proxy")
+        command = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().split(b"\0")
+        assert command[command.index(b"--llm-backend") + 1] == b"all"
+        assert b"--kobold-router-mode" not in command
+        tabby_pid = next(pid for cwd, pid in llms if cwd.name == "tabby")
+        tabby_command = Path(f"/proc/{tabby_pid}/cmdline").read_bytes().split(b"\0")
+        assert tabby_command[tabby_command.index(b"--model-name") + 1] == b""
+        assert tabby_command[tabby_command.index(b"--embedding-model-name") + 1] == b""
+        stopped = subprocess.run(
+            ["zsh", str(fake_stack.script), "--stop"], cwd=fake_stack.outside,
+            env=fake_stack.env, capture_output=True, text=True, timeout=20, check=False,
+        )
+        assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+        output = supervisor.communicate(timeout=12)[0]
+        assert supervisor.returncode == 143, output
+        assert "Select configuration" not in output
+        assert ("Enter: all" in output) is interactive
+        assert not list(runtime.glob("*.pgid"))
+        assert config.read_text() == "{}\n"
+    finally:
+        if supervisor.poll() is None:
+            supervisor.send_signal(signal.SIGTERM)
+            supervisor.communicate(timeout=12)

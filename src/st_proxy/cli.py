@@ -75,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM origin; --kobold-url is retained as a compatibility alias",
     )
     parser.add_argument("--comfy-url", default=_env("COMFY_URL", "http://127.0.0.1:8189"))
+    parser.add_argument("--tabby-url", default=_env("TABBY_URL", "http://127.0.0.1:5003"))
+    parser.add_argument("--prism-url", default=_env("PRISM_URL", "http://127.0.0.1:5006"))
     parser.add_argument(
         "--kobold-admin-password",
         default=_env("KOBOLD_ADMIN_PASSWORD"),
@@ -179,6 +181,8 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         image_port=args.image_port,
         llm_backend=args.llm_backend,
         llm_url=llm_url,
+        tabby_url=args.tabby_url,
+        prism_url=args.prism_url,
         comfy_url=args.comfy_url,
         kobold_admin_password=args.kobold_admin_password,
         kobold_router_mode=args.kobold_router_mode,
@@ -231,7 +235,7 @@ async def check_backend(
     ) as session:
         backend = build_llm_backend(session, check_config)
         await backend.validate_control()
-        if config.llm_backend in {"tabbyapi", "prism"}:
+        if config.llm_backend in {"tabbyapi", "prism", "all"}:
             # Server readiness must not require (or trigger) a model load.
             await backend.observe_ready()
         else:

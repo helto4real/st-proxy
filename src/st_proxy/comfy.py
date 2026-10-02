@@ -162,7 +162,7 @@ class ComfyClient:
         LOG.info("ComfyUI VRAM cleanup requested")
         try:
             async with asyncio.timeout(self._config.cleanup_timeout):
-                if self._config.llm_backend == "tabbyapi":
+                if self._config.llm_backend in {"tabbyapi", "all"}:
                     await self._wait_for_idle()
                 async with self._session.post(
                     child_url(self._config.comfy_url, "/free"),
@@ -180,7 +180,7 @@ class ComfyClient:
                     )
                 # /free acknowledges queued cleanup, not physical VRAM release.
                 await asyncio.sleep(5.0)
-                if self._config.llm_backend == "tabbyapi":
+                if self._config.llm_backend in {"tabbyapi", "all"}:
                     await self._wait_for_memory_settled()
                 LOG.info("ComfyUI cleanup wait completed")
         except UpstreamError:

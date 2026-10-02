@@ -61,6 +61,11 @@ class PrismBackend:
             raise ValueError("unknown Prism model")
         return PrismRestorePoint(model)
 
+    async def available_models(self) -> dict[str, Any]:
+        return {"object": "list", "data": [
+            {"id": model, "object": "model"} for model in await self._states()
+        ]}
+
     async def _json(self, path: str, *, model: str | None = None) -> Any:
         try:
             async with asyncio.timeout(self._timeouts.request):

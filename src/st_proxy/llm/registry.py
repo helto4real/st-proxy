@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import ClientSession
@@ -9,6 +9,7 @@ from aiohttp import ClientSession
 from ..errors import ConfigurationError
 from .base import BackendTimeouts, LlmBackend
 from .koboldcpp import KoboldCppBackend
+from .multi import MultiBackend
 from .ollama import OllamaBackend
 from .prism import PrismBackend
 from .tabbyapi import TabbyApiBackend
@@ -92,7 +93,7 @@ _BACKENDS = {
 
 
 def available_backend_kinds() -> tuple[str, ...]:
-    return tuple(_BACKENDS)
+    return (*_BACKENDS, "all")
 
 
 def _backend_spec(kind: str) -> BackendSpec:
@@ -106,6 +107,8 @@ def _backend_spec(kind: str) -> BackendSpec:
 
 
 def backend_default_origin(kind: str) -> str:
+    if kind == "all":
+        return _BACKENDS["koboldcpp"].default_origin
     return _backend_spec(kind).default_origin
 
 
@@ -113,4 +116,13 @@ def build_llm_backend(
     session: ClientSession,
     config: BrokerConfig,
 ) -> LlmBackend[Any]:
+    if config.llm_backend == "all":
+        return MultiBackend({
+            "koboldcpp": _build_koboldcpp(session, replace(
+                config, llm_backend="koboldcpp", kobold_router_mode=True)),
+            "tabbyapi": _build_tabbyapi(session, replace(
+                config, llm_backend="tabbyapi", llm_url=config.tabby_url)),
+            "prism": _build_prism(session, replace(
+                config, llm_backend="prism", llm_url=config.prism_url)),
+        })
     return _backend_spec(config.llm_backend).build(session, config)
