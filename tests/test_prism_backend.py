@@ -15,6 +15,7 @@ from st_proxy.llm.prism import PrismBackend, PrismRestorePoint
 from st_proxy.service import BrokerService
 
 from .support import DynamicServer, MockComfy, MockKobold, prompt_payload, wait_until
+from .test_prism_diagnostics import LOGGER, PRIVATE, diagnostic_stream, stream_bytes
 
 
 class MockPrism(MockKobold):
@@ -114,6 +115,23 @@ class MockPrism(MockKobold):
 
 
 class PrismTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_diagnostics_preserve_response_and_request_usage(self):
+        self.prism.stream = diagnostic_stream
+        with self.assertLogs(LOGGER, "INFO") as captured:
+            async with self.client.post(self.chat_url + "/v1/chat/completions", json={
+                "model": self.prism.model, "stream": True, "max_tokens": 1500,
+                "reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": False},
+                "stream_options": {"include_usage": False},
+            }) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(await response.read(), stream_bytes())
+        self.assertEqual(len(captured.output), 1)
+        self.assertNotIn(PRIVATE, captured.output[0])
+        self.assertIn("finish_reason=length stream_status=complete", captured.output[0])
+        self.assertIn("completion_tokens=1500", captured.output[0])
+        self.assertEqual(json.loads(self.prism.chat_payloads[-1])["stream_options"],
+                         {"include_usage": True})
+
     async def asyncSetUp(self):
         self.prism = MockPrism()
         self.comfy = MockComfy()

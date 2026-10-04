@@ -19,9 +19,24 @@ from .tabby_support import MockTabby
 from .test_comfy_cleanup import CleanupComfy
 from .test_kobold_router import NativeRouter
 from .test_prism_backend import MockPrism
+from .test_prism_diagnostics import LOGGER, PRIVATE, diagnostic_stream, stream_bytes
 
 
 class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prism_diagnostics_also_apply_in_all_mode(self):
+        self.prism.stream = diagnostic_stream
+        with self.assertLogs(LOGGER, "INFO") as captured:
+            status, body = await self.chat(self.models["prism"], stream=True, max_tokens=1500,
+                                           reasoning_effort="none",
+                                           chat_template_kwargs={"enable_thinking": False})
+        self.assertEqual(status, 200)
+        self.assertEqual(body, stream_bytes())
+        self.assertEqual(len(captured.output), 1)
+        self.assertNotIn(PRIVATE, captured.output[0])
+        self.assertIn("finish_reason=length stream_status=complete", captured.output[0])
+        self.assertEqual(json.loads(self.prism.chat_payloads[-1])["stream_options"],
+                         {"include_usage": True})
+
     async def asyncSetUp(self):
         self.kobold = NativeRouter()
         self.kobold.model = "inactive"

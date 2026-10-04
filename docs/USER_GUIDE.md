@@ -1141,6 +1141,28 @@ that it may behave like xhigh; for short thinking use `medium` with a positive
 controls. `high` is unsupported by this model and returns a native HTTP 500.
 Budget 0 did not disable thinking in the installed build; use `none` instead.
 
+Each Prism Chat Completions response produces an INFO summary, in both Prism-only
+and all-backend modes. It records the requested `max_tokens`, `reasoning_effort`
+and `enable_thinking`, plus reported prompt, cached and completion token counts.
+For streaming requests the proxy sets `stream_options.include_usage: true`,
+preserving other stream options, and forwards the resulting response unchanged.
+
+`reasoning_chars` counts characters received in `reasoning_content`.
+`reasoning_tokens` is `unavailable` unless Prism reports a separate native token
+count; characters are never converted into an estimated token count. Missing
+usage fields are also `unavailable`. Prompts, model names and generated text are
+never included in this summary.
+
+`finish_reason=length` indicates a generation limit; `stop` indicates a normal
+model/stop-sequence ending. `stream_status=complete` means the response finished
+with a reported finish reason (and `[DONE]` for SSE), independently of the model's
+finish reason. `interrupted` means upstream did not finish, `incomplete` means
+the diagnostics could not confirm a complete response, and `http_error` means a
+non-200 response. `client_disconnected=true` records a failed downstream write;
+the proxy still drains upstream before releasing the GPU reservation. Observation
+is bounded to 1 MiB per SSE event or JSON response; exceeding this limit makes
+diagnostics incomplete without truncating the forwarded response.
+
 ```bash
 curl http://127.0.0.1:5002/v1/chat/completions \
   -H 'Content-Type: application/json' \

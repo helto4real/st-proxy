@@ -5,6 +5,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
+from typing import Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import (
@@ -148,6 +149,12 @@ async def buffer_response(response: ClientResponse) -> BufferedResponse:
     )
 
 
+class ResponseObserver(Protocol):
+    def start(self, status: int, content_type: str) -> None: ...
+    def feed(self, chunk: bytes) -> None: ...
+    def finish(self, *, upstream_complete: bool, client_connected: bool) -> None: ...
+
+
 async def proxy_stream(
     request: web.Request,
     session: ClientSession,
@@ -157,46 +164,55 @@ async def proxy_stream(
     raw_query: str | None = None,
     body: bytes | None = None,
     target: str = "upstream",
+    observer: ResponseObserver | None = None,
 ) -> web.StreamResponse:
-    async with session.request(
-        request.method,
-        upstream_url(origin, request, raw_path=raw_path, raw_query=raw_query),
-        headers=upstream_request_headers(request, origin),
-        data=request_body(request) if body is None else body,
-        allow_redirects=False,
-    ) as upstream:
-        if upstream.status >= 400:
-            LOG.error(
-                "upstream request failed: target=%s method=%s path=%s status=%s",
-                target, request.method, request.path, upstream.status,
+    complete = False
+    connected = True
+    try:
+        async with session.request(
+            request.method,
+            upstream_url(origin, request, raw_path=raw_path, raw_query=raw_query),
+            headers=upstream_request_headers(request, origin),
+            data=request_body(request) if body is None else body,
+            allow_redirects=False,
+        ) as upstream:
+            if observer is not None:
+                observer.start(upstream.status, upstream.content_type)
+            if upstream.status >= 400:
+                LOG.error(
+                    "upstream request failed: target=%s method=%s path=%s status=%s",
+                    target, request.method, request.path, upstream.status,
+                )
+            downstream = web.StreamResponse(
+                status=upstream.status,
+                reason=upstream.reason,
+                headers=downstream_response_headers(
+                    upstream.headers.items(), origin=origin, request=request,
+                ),
             )
-        downstream = web.StreamResponse(
-            status=upstream.status,
-            reason=upstream.reason,
-            headers=downstream_response_headers(
-                upstream.headers.items(),
-                origin=origin,
-                request=request,
-            ),
-        )
-        connected = True
-        try:
-            await downstream.prepare(request)
-        except (ConnectionError, RuntimeError):
-            connected = False
-        async for chunk in upstream.content.iter_any():
+            try:
+                await downstream.prepare(request)
+            except (ConnectionError, RuntimeError):
+                connected = False
+            async for chunk in upstream.content.iter_any():
+                if observer is not None:
+                    observer.feed(chunk)
+                if connected:
+                    try:
+                        await downstream.write(chunk)
+                    except (ConnectionError, RuntimeError):
+                        # Drain upstream before releasing the chat lease.
+                        connected = False
+            complete = True
             if connected:
                 try:
-                    await downstream.write(chunk)
+                    await downstream.write_eof()
                 except (ConnectionError, RuntimeError):
-                    # Drain the upstream generation before releasing the chat lease.
                     connected = False
-        if connected:
-            try:
-                await downstream.write_eof()
-            except (ConnectionError, RuntimeError):
-                pass
-        return downstream
+            return downstream
+    finally:
+        if observer is not None:
+            observer.finish(upstream_complete=complete, client_connected=connected)
 
 
 async def _client_to_upstream(

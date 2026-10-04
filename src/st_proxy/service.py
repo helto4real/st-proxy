@@ -20,6 +20,7 @@ from .llm import LlmBackend, build_llm_backend
 from .llm.koboldcpp import KoboldCppBackend
 from .llm.multi import MultiBackend, MultiTarget
 from .llm.prism import PrismBackend, PrismRestorePoint
+from .llm.prism_diagnostics import PrismDiagnostics, request_usage
 from .llm.strata import STRATA_TEXT_PATHS, StrataBackend, StrataRestorePoint
 from .llm.tabbyapi import adapt_chat_request
 
@@ -472,6 +473,8 @@ class BrokerService:
             body = default_model_body(body, self.config.kobold_default_model)
         if target.engine == "tabbyapi" and path == "/v1/chat/completions":
             body = adapt_chat_request(body)
+        if target.engine == "prism" and path == "/v1/chat/completions":
+            body = request_usage(payload)
         if len(body) > self.config.max_chat_body_bytes:
             raise web.HTTPRequestEntityTooLarge(
                 max_size=self.config.max_chat_body_bytes, actual_size=len(body))
@@ -509,6 +512,8 @@ class BrokerService:
                     raw_path=path,
                     raw_query=request.rel_url.update_query(model=target.model).raw_query_string,
                     target=backend.info.label,
+                    observer=(PrismDiagnostics(body) if target.engine == "prism"
+                              and path == "/v1/chat/completions" else None),
                 )
                 if target.engine == "koboldcpp" and response.status >= 500:
                     self.llm.request_failed(target)
@@ -583,6 +588,11 @@ class BrokerService:
         if payload is not None and model is None:
             payload["model"] = target.model
             body = json.dumps(payload).encode()
+        if not strata and payload is not None and path == "/v1/chat/completions":
+            body = request_usage(payload)
+        if len(body) > self.config.max_chat_body_bytes:
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=self.config.max_chat_body_bytes, actual_size=len(body))
         acquired = asyncio.Event()
         task = asyncio.create_task(self._managed_model_chat(request, target, body, acquired))
         try:
@@ -612,6 +622,10 @@ class BrokerService:
                 request, self.chat_session, self.llm.info.chat_origin, body=body,
                 raw_query=request.rel_url.update_query(model=target.model).raw_query_string,
                 target=self.llm.info.label,
+                observer=(PrismDiagnostics(body)
+                          if isinstance(self.llm, PrismBackend)
+                          and request.path.rstrip("/") == "/v1/chat/completions"
+                          and body else None),
             )
 
     async def _chat_body(self, request: web.Request) -> bytes:
