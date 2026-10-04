@@ -36,3 +36,6 @@ node_modules/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local raw runtime / roleplay capture (not a source fixture)
+/test.txt

@@ -1,4 +1,4 @@
-"""One GPU participant backed by the three native model managers.
+"""One GPU participant backed by the native model managers.
 
 The coordinator still owns the FIFO and response lifetime. This adapter owns
 cross-engine release, while native adapters retain their lifecycle contracts.
@@ -11,6 +11,7 @@ from typing import Any
 from .base import BackendInfo, RestorePoint, backend_error
 from .koboldcpp import KoboldCppBackend, KoboldCppRestorePoint
 from .prism import PrismBackend, PrismRestorePoint
+from .strata import StrataBackend
 from .tabbyapi import TabbyApiBackend, TabbyApiRestorePoint
 
 
@@ -23,7 +24,7 @@ class MultiTarget:
 
 class MultiBackend:
     def __init__(self, backends: dict[
-        str, KoboldCppBackend | TabbyApiBackend | PrismBackend,
+        str, KoboldCppBackend | TabbyApiBackend | PrismBackend | StrataBackend,
     ]) -> None:
         self.backends = backends
         self.info = BackendInfo("all", "LLM backends", "")
@@ -131,6 +132,8 @@ class MultiBackend:
         if native is None:
             if isinstance(backend, TabbyApiBackend):
                 native = TabbyApiRestorePoint(target.model, {})
+            elif isinstance(backend, StrataBackend):
+                native = await backend.request_target(target.model)
             elif isinstance(backend, PrismBackend):
                 native = PrismRestorePoint(target.model)
             else:

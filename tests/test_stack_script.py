@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -46,6 +48,9 @@ class FakeStack:
         self.script.chmod(0o755)
 
         self._create_services()
+        (self.repo / "scripts").mkdir()
+        shutil.copy2(REPO_ROOT / "scripts/kobold_bootstrap.py", self.repo / "scripts")
+        (self.repo / ".venv/bin/python").symlink_to(sys.executable)
         self.env = os.environ.copy()
         self.env.update(
             {
@@ -79,6 +84,17 @@ while :; do sleep 1; done
         _write_executable(
             self.llm_dir / "koboldcpp-linux-x64", shell_service("llm")
         )
+
+        qwen = self.home / "git" / "qwen-next-server"
+        for script, model in (
+            ("start-server.sh", "Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS"),
+            ("start-orca.sh", "Qwen3.8-Flash-Next-Uncensored-IQ3_XXS"),
+        ):
+            # Logged model-directory cwd lets the fake readiness checker tell them apart.
+            launcher = qwen / model / "launch.py"
+            _write_executable(launcher, shell_service("llm"))
+            _write_executable(qwen / script,
+                              f'#!/bin/sh\ncd "{launcher.parent}"\nexec "{launcher}" "$@"\n')
 
         _write_executable(self.silly_dir / "start.sh", shell_service("silly"))
 
@@ -119,6 +135,8 @@ if [ "$check_backend" -eq 1 ]; then
     case "$llm_url" in
         *:5003) suffix=/tabby ;;
         *:5006) suffix=/prism ;;
+        *:48640) suffix=/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS ;;
+        *:48642) suffix=/Qwen3.8-Flash-Next-Uncensored-IQ3_XXS ;;
     esac
     pid=$(awk -F '|' -v suffix="$suffix" \\
         '$1 == "llm" && (suffix == "" || index($2, suffix)) { pid = $3 } \\
@@ -339,11 +357,18 @@ def test_koboldcpp_config_setting_accepts_relative_name_without_extension(
     assert len({link.name for link in links}) == 2
     assert (runtime / "kobold-models.json").is_file()
     assert "--admin --routermode --admindir" in llm_command
+    bootstrap = json.loads((admin_dirs[0] / "bootstrap.json").read_text())
+    assert bootstrap == {"nomodel": True, "usecpu": True, "admin": True, "routermode": True}
+    default_model = (runtime / "kobold-default-model").read_text().strip()
+    assert (admin_dirs[0] / default_model).resolve() == config
+    proxy_pid = next(pid for service, _, pid in events if service == "proxy")
+    proxy_args = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().split(b"\0")
+    assert proxy_args[proxy_args.index(b"--kobold-default-model") + 1].decode() == default_model
     supervisor.send_signal(signal.SIGINT)
     output = supervisor.communicate(timeout=12)[0]
 
     assert supervisor.returncode == 130
-    assert f"--config {config}" in llm_command
+    assert f"--config {admin_dirs[0]}/bootstrap.json" in llm_command
     assert "selected KoboldCpp config: roleplay/gemma4/primary config" in output
     assert "Select configuration" not in output
     assert not admin_dirs[0].exists()
@@ -385,7 +410,8 @@ def test_koboldcpp_prompts_with_sorted_names_without_idle_restore(
     output = supervisor.communicate(timeout=12)[0]
 
     assert supervisor.returncode == 130
-    assert f"--config {selected}" in llm_command
+    assert "/bootstrap.json" in llm_command
+    assert "--kobold-default-model primary config--" in proxy_command
     assert "  1) general/alpha" in output
     assert "  2) roleplay/gemma4/primary config" in output
     assert "Select configuration [1-2]:" in output
@@ -721,6 +747,8 @@ def test_proxy_does_not_require_alltalk_ready_response(fake_stack: FakeStack) ->
 @pytest.mark.parametrize("backend, directory, port, choice, label", [
     ("tabbyapi", "tabby", 5003, "2", "TabbyAPI"),
     ("prism", "prism", 5006, "3", "Prism"),
+    ("sc117", "qwen-next-server", 48640, "4", "Qwen SC117"),
+    ("orca", "qwen-next-server", 48642, "5", "Qwen Orca"),
 ])
 @pytest.mark.parametrize("interactive", [False, True])
 def test_backend_selection_and_existing_start_flow(
@@ -765,7 +793,9 @@ def test_backend_selection_and_existing_start_flow(
     assert f"starting {label}" in output
     assert "Select configuration" not in output
     assert ("Select LLM backend" in output) is interactive
-    assert any(service == "llm" and cwd == backend_dir for service, cwd, _pid in events)
+    assert any(service == "llm" and (cwd == backend_dir or cwd.parent == backend_dir)
+               for service, cwd, _pid in events)
+
 
 
 @pytest.mark.parametrize("interactive", [True, False])
@@ -792,15 +822,31 @@ def test_all_backends_start_stop_and_keep_separate_process_groups(fake_stack, in
         assert {cwd for cwd, _ in llms} == {
             fake_stack.llm_dir, fake_stack.home / "git" / "tabby",
             fake_stack.home / "git" / "prism",
+            (fake_stack.home / "git" / "qwen-next-server"
+             / "Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS"),
+            fake_stack.home / "git" / "qwen-next-server" / "Qwen3.8-Flash-Next-Uncensored-IQ3_XXS",
         }
         runtime = fake_stack.runtime / f"st-stack-{os.getuid()}"
         assert (runtime / "llm-backend").read_text().strip() == "all"
-        for engine in ("koboldcpp", "tabbyapi", "prism"):
+        for engine in ("koboldcpp", "tabbyapi", "prism", "sc117", "orca"):
             assert (runtime / f"llm-{engine}.pgid").exists()
         proxy_pid = next(pid for service, _, pid in events if service == "proxy")
         command = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().split(b"\0")
         assert command[command.index(b"--llm-backend") + 1] == b"all"
         assert b"--kobold-router-mode" not in command
+        default_model = (runtime / "kobold-default-model").read_text().strip()
+        assert command[command.index(b"--kobold-default-model") + 1].decode() == default_model
+        admin_dir = next(runtime.glob("kobold-admin.*"))
+        assert (admin_dir / default_model).resolve() == config
+        bootstrap = json.loads((admin_dir / "bootstrap.json").read_text())
+        assert bootstrap["nomodel"] is True and bootstrap["usecpu"] is True
+        assert len(llms) == 5
+        for cwd, pid in llms:
+            if cwd.parent.name == "qwen-next-server":
+                args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+                assert b"--lazy" in args
+                expected = b"48640" if "GSQ" in cwd.name else b"48642"
+                assert args[args.index(b"--port") + 1] == expected
         tabby_pid = next(pid for cwd, pid in llms if cwd.name == "tabby")
         tabby_command = Path(f"/proc/{tabby_pid}/cmdline").read_bytes().split(b"\0")
         assert tabby_command[tabby_command.index(b"--model-name") + 1] == b""

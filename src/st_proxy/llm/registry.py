@@ -12,6 +12,7 @@ from .koboldcpp import KoboldCppBackend
 from .multi import MultiBackend
 from .ollama import OllamaBackend
 from .prism import PrismBackend
+from .strata import StrataBackend
 from .tabbyapi import TabbyApiBackend
 
 if TYPE_CHECKING:
@@ -72,6 +73,13 @@ def _build_prism(session: ClientSession, config: BrokerConfig) -> PrismBackend:
     )
 
 
+def _build_strata(session: ClientSession, config: BrokerConfig) -> StrataBackend:
+    return StrataBackend(
+        session, kind=config.llm_backend, label=_backend_spec(config.llm_backend).label,
+        origin=config.llm_url, timeouts=_timeouts(config),
+    )
+
+
 _BACKENDS = {
     "koboldcpp": BackendSpec(
         "koboldcpp",
@@ -85,6 +93,8 @@ _BACKENDS = {
         "http://127.0.0.1:11434",
         _build_ollama,
     ),
+    "sc117": BackendSpec("sc117", "Qwen SC117", "http://127.0.0.1:48640", _build_strata),
+    "orca": BackendSpec("orca", "Qwen Orca", "http://127.0.0.1:48642", _build_strata),
     "prism": BackendSpec("prism", "Prism", "http://127.0.0.1:5006", _build_prism),
     "tabbyapi": BackendSpec(
         "tabbyapi", "TabbyAPI", "http://127.0.0.1:5003", _build_tabbyapi,
@@ -122,6 +132,10 @@ def build_llm_backend(
                 config, llm_backend="koboldcpp", kobold_router_mode=True)),
             "tabbyapi": _build_tabbyapi(session, replace(
                 config, llm_backend="tabbyapi", llm_url=config.tabby_url)),
+            "sc117": _build_strata(session, replace(
+                config, llm_backend="sc117", llm_url=config.sc117_url)),
+            "orca": _build_strata(session, replace(
+                config, llm_backend="orca", llm_url=config.orca_url)),
             "prism": _build_prism(session, replace(
                 config, llm_backend="prism", llm_url=config.prism_url)),
         })

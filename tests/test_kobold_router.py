@@ -393,3 +393,20 @@ class RouterBrokerTests(unittest.IsolatedAsyncioTestCase):
         async with self.client.get(self.chat + "/v1/models") as response:
             self.assertEqual(len((await response.json())["data"]), 4)
         self.assertEqual(self.router.selected, ["b.kcpps"])
+
+    async def test_cold_router_check_and_default_profile_are_passive_until_request(self):
+        self.router.model = "inactive"
+        self.service.config = replace(self.config, kobold_default_model="a.kcpps")
+        await check_backend(self.service.config, 1, str(self.cache))
+        self.assertEqual(self.router.selected, [])
+        self.assertEqual(self.router.admin_calls, [])
+        self.assertEqual(self.comfy.free_calls, 0)
+        self.assertEqual(self.status()["state"], "awaiting_request")
+        self.assertIn("a.kcpps", self.cache.read_text())
+        for payload in ({}, {"model": "initial_model"}, {"model": "b.kcpps"}):
+            async with self.client.post(self.chat + "/v1/chat/completions",
+                                        json=payload) as response:
+                self.assertEqual(response.status, 200)
+                await response.read()
+        self.assertEqual(self.router.selected, ["a.kcpps", "a.kcpps", "b.kcpps"])
+        self.assertEqual(self.router.loads, ["a.kcpps", "b.kcpps"])

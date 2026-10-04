@@ -20,6 +20,7 @@ from .llm import LlmBackend, build_llm_backend
 from .llm.koboldcpp import KoboldCppBackend
 from .llm.multi import MultiBackend, MultiTarget
 from .llm.prism import PrismBackend, PrismRestorePoint
+from .llm.strata import STRATA_TEXT_PATHS, StrataBackend, StrataRestorePoint
 from .llm.tabbyapi import adapt_chat_request
 
 LOG = logging.getLogger(__name__)
@@ -327,8 +328,8 @@ class BrokerService:
                 response = await self._multi_handler(request)
             elif self.config.kobold_router_mode:
                 response = await self._router_handler(request)
-            elif self.llm.info.kind == "prism":
-                response = await self._prism_handler(request)
+            elif isinstance(self.llm, (PrismBackend, StrataBackend)):
+                response = await self._managed_model_handler(request)
             elif _is_tabby_service_metadata(request, self.llm.info.kind):
                 response = await proxy_stream(
                     request,
@@ -458,6 +459,8 @@ class BrokerService:
         # Model-dependent API calls are admitted; lifecycle routes cannot acquire
         # arbitrary extra models outside the shared GPU reservation.
         active_paths = set(TEXT_PATHS)
+        if isinstance(backend, StrataBackend):
+            active_paths = STRATA_TEXT_PATHS
         if target.engine == "prism":
             active_paths.update({"/completion", "/tokenize", "/detokenize", "/apply-template",
                                  "/v1/embeddings", "/embeddings", "/rerank", "/v1/rerank"})
@@ -465,6 +468,8 @@ class BrokerService:
             raise web.HTTPForbidden(text="unsupported model request in all-backend mode")
         if payload is None:
             raise web.HTTPBadRequest(text="expected a JSON object with model")
+        if target.engine == "koboldcpp":
+            body = default_model_body(body, self.config.kobold_default_model)
         if target.engine == "tabbyapi" and path == "/v1/chat/completions":
             body = adapt_chat_request(body)
         if len(body) > self.config.max_chat_body_bytes:
@@ -515,10 +520,19 @@ class BrokerService:
                     await self.coordinator.router_request_failed()
                 raise
 
-    async def _prism_handler(self, request: web.Request) -> web.StreamResponse:
+    async def _managed_model_handler(self, request: web.Request) -> web.StreamResponse:
         assert self.coordinator is not None and self.chat_session is not None
         assert self.llm is not None
         path = request.path.rstrip("/")
+        strata = isinstance(self.llm, StrataBackend)
+        if strata and not (
+            (request.method == "POST" and path in STRATA_TEXT_PATHS)
+            or (request.method in {"GET", "HEAD"} and path in {
+                "/health", "/api/health", "/models", "/v1/models", "/v1/status",
+                "/props", "/slots",
+            })
+        ):
+            raise web.HTTPForbidden(text="unsupported request or broker-owned lifecycle")
         # Router reload/autoload overrides and lifecycle operations must not bypass
         # the broker's GPU handoff, including model-list refresh via GET.
         if (
@@ -528,24 +542,27 @@ class BrokerService:
                 and request.method not in {"GET", "HEAD"})
         ):
             raise web.HTTPForbidden(text="model lifecycle is owned by the broker")
-        if request.method in {"GET", "HEAD"} and path in {"/health", "/models", "/v1/models"}:
+        if request.method in {"GET", "HEAD"} and path in {
+            "/health", "/api/health", "/models", "/v1/models", "/v1/status",
+        }:
             return await proxy_stream(
                 request, self.chat_session, self.llm.info.chat_origin,
                 target=self.llm.info.label,
             )
         if request.method in {"GET", "HEAD"} and path in {"/props", "/metrics", "/slots"}:
             async with self.coordinator.passive_llm_metadata() as available:
-                assert isinstance(self.llm, PrismBackend)
+                assert isinstance(self.llm, (PrismBackend, StrataBackend))
                 active = await self.llm.observe_ready() if available else None
                 requested = request.query.get("model")
                 if active is None or (requested is not None and requested != active.model):
-                    return web.json_response({"error": "Prism model is not active"}, status=503)
+                    return web.json_response(
+                        {"error": f"{self.llm.info.label} model is not active"}, status=503)
                 return await proxy_stream(
                     request, self.chat_session, self.llm.info.chat_origin,
                     raw_query=request.rel_url.update_query(model=active.model).raw_query_string,
                     target=self.llm.info.label,
                 )
-        assert isinstance(self.llm, PrismBackend)
+        assert isinstance(self.llm, (PrismBackend, StrataBackend))
         body = await self._chat_body(request) if request.can_read_body else b""
         payload = None
         if body:
@@ -567,7 +584,7 @@ class BrokerService:
             payload["model"] = target.model
             body = json.dumps(payload).encode()
         acquired = asyncio.Event()
-        task = asyncio.create_task(self._prism_chat(request, target, body, acquired))
+        task = asyncio.create_task(self._managed_model_chat(request, target, body, acquired))
         try:
             while not task.done() and not acquired.is_set():
                 if request.transport is None or request.transport.is_closing():
@@ -581,8 +598,8 @@ class BrokerService:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
-    async def _prism_chat(
-        self, request: web.Request, target: PrismRestorePoint, body: bytes,
+    async def _managed_model_chat(
+        self, request: web.Request, target: PrismRestorePoint | StrataRestorePoint, body: bytes,
         acquired: asyncio.Event,
     ) -> web.StreamResponse:
         assert self.coordinator is not None and self.chat_session is not None
@@ -671,7 +688,7 @@ class BrokerService:
             path = request.path.rstrip("/")
             if request.method == "POST" and path in TEXT_PATHS:
                 try:
-                    body = default_model_body(body)
+                    body = default_model_body(body, self.config.kobold_default_model)
                 except (ValueError, UnicodeError):
                     raise web.HTTPBadRequest(text="expected a JSON object") from None
                 path = TEXT_PATHS[path]

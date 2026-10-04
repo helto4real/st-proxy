@@ -47,6 +47,19 @@ configure_llm_backend() {
             # Do not inherit a KoboldCpp-only mode into the selected adapter.
             export ST_PROXY_KOBOLD_ROUTER_MODE=false
             ;;
+        sc117|orca)
+            LLM_DEFAULT_DIR="${HOME}/git/qwen-next-server"
+            if [[ "${LLM_BACKEND}" == sc117 ]]; then
+                LLM_LABEL="Qwen SC117"
+                LLM_DEFAULT_URL="${ST_PROXY_SC117_URL:-http://127.0.0.1:48640}"
+                LLM_DEFAULT_COMMAND="./start-server.sh --lazy"
+            else
+                LLM_LABEL="Qwen Orca"
+                LLM_DEFAULT_URL="${ST_PROXY_ORCA_URL:-http://127.0.0.1:48642}"
+                LLM_DEFAULT_COMMAND="./start-orca.sh --lazy"
+            fi
+            export ST_PROXY_KOBOLD_ROUTER_MODE=false
+            ;;
         ollama)
             LLM_LABEL="Ollama"
             LLM_DEFAULT_URL="http://127.0.0.1:11434"
@@ -65,7 +78,7 @@ configure_llm_backend() {
             ;;
     esac
     typeset -g LLM_URL="${ST_PROXY_LLM_URL:-${LLM_DEFAULT_URL}}"
-    if [[ "${LLM_BACKEND}" != tabbyapi && "${LLM_BACKEND}" != prism ]]; then
+    if [[ "${LLM_BACKEND}" == koboldcpp || "${LLM_BACKEND}" == ollama || "${LLM_BACKEND}" == all ]]; then
         LLM_URL="${ST_PROXY_LLM_URL:-${ST_PROXY_KOBOLD_URL:-${LLM_DEFAULT_URL}}}"
     fi
     typeset -g LLM_DIR="${ST_STACK_LLM_DIR:-${LLM_DEFAULT_DIR}}"
@@ -77,6 +90,19 @@ configure_llm_backend() {
     fi
     if [[ "${LLM_BACKEND}" == prism ]] && (( ! LLM_COMMAND_EXPLICIT )); then
         LLM_COMMAND_NAME="llama-server"
+    fi
+    if [[ "${LLM_BACKEND}" == sc117 || "${LLM_BACKEND}" == orca ]]; then
+        # The scripts exec their model-specific Python launcher in this directory.
+        if (( ! LLM_COMMAND_EXPLICIT )); then
+            if [[ "${LLM_BACKEND}" == sc117 ]]; then
+                LLM_COMMAND_NAME="qwen3.8-flash-next-gsq-rco-abliterated-iq3_xxs/launch.py"
+            else
+                LLM_COMMAND_NAME="qwen3.8-flash-next-uncensored-iq3_xxs/launch.py"
+            fi
+            if [[ "${LLM_URL}" =~ '^https?://[^/:]+:([0-9]+)(/.*)?$' ]]; then
+                LLM_COMMAND+=(--port "${match[1]}")
+            fi
+        fi
     fi
     typeset -g KOBOLD_CONFIG_DIR="${ST_STACK_KOBOLD_CONFIG_DIR:-${LLM_DIR}/models}"
     typeset -g KOBOLD_CONFIG_SETTING="${ST_STACK_KOBOLD_CONFIG:-}"
@@ -117,6 +143,8 @@ with_llm_backend() (
             ;;
         tabbyapi) export ST_PROXY_LLM_URL="${ST_PROXY_TABBY_URL:-http://127.0.0.1:5003}" ;;
         prism) export ST_PROXY_LLM_URL="${ST_PROXY_PRISM_URL:-http://127.0.0.1:5006}" ;;
+        sc117) export ST_PROXY_LLM_URL="${ST_PROXY_SC117_URL:-http://127.0.0.1:48640}" ;;
+        orca) export ST_PROXY_LLM_URL="${ST_PROXY_ORCA_URL:-http://127.0.0.1:48642}" ;;
     esac
     configure_llm_backend || return 1
     if [[ "${LLM_URL}" =~ '^https?://[^/:]+:([0-9]+)(/.*)?$' ]]; then
@@ -135,6 +163,7 @@ with_llm_backend() (
 typeset -gr RUNTIME_BASE="${XDG_RUNTIME_DIR:-/tmp}"
 typeset -gr RUNTIME_DIR="${RUNTIME_BASE}/st-stack-${UID}"
 typeset -gr KOBOLD_MODEL_CACHE="${RUNTIME_DIR}/kobold-models.json"
+typeset -gr KOBOLD_DEFAULT_MODEL_FILE="${RUNTIME_DIR}/kobold-default-model"
 typeset -gr LOCK_DIR="${RUNTIME_DIR}/supervisor.lock"
 typeset -gr SUPERVISOR_FILE="${RUNTIME_DIR}/supervisor.pid"
 
@@ -304,7 +333,7 @@ prompt_for_kobold_config() {
 
 configure_kobold_command() {
     local executable_path
-    local config relative digest linkname
+    local config relative digest linkname default_model
 
     (( LLM_COMMAND_EXPLICIT )) && return 0
     discover_kobold_configs || return 1
@@ -341,8 +370,13 @@ configure_kobold_command() {
             digest=${digest%% *}
             linkname="${config:t:r}--${digest[1,12]}.kcpps"
             ln -s -- "${config}" "${KOBOLD_ADMIN_DIR}/${linkname}" || return 1
+            [[ "${config}" == "${KOBOLD_SELECTED_CONFIG}" ]] && default_model=${linkname}
         done
-        LLM_COMMAND+=(--admin --routermode --admindir "${KOBOLD_ADMIN_DIR}")
+        "${PROXY_PATH:h}/python" "${SCRIPT_DIR}/scripts/kobold_bootstrap.py" \
+            "${KOBOLD_SELECTED_CONFIG}" "${KOBOLD_ADMIN_DIR}/bootstrap.json" || return 1
+        print -r -- "${default_model}" >| "${KOBOLD_DEFAULT_MODEL_FILE}"
+        LLM_COMMAND=("${KOBOLD_EXECUTABLE}" --config "${KOBOLD_ADMIN_DIR}/bootstrap.json"
+                     --admin --routermode --admindir "${KOBOLD_ADMIN_DIR}")
     fi
     LLM_COMMAND_NAME=${KOBOLD_EXECUTABLE:t:l}
     kobold_config_display_name "${KOBOLD_SELECTED_CONFIG}"
@@ -440,7 +474,7 @@ service_running() {
 llm_ready() {
     if [[ "${LLM_BACKEND}" == all ]]; then
         local engine
-        for engine in koboldcpp tabbyapi prism; do
+        for engine in koboldcpp tabbyapi prism sc117 orca; do
             with_llm_backend "${engine}" llm_ready || return 1
         done
         return 0
@@ -644,7 +678,7 @@ ensure_service_started() {
 
     if [[ "${service}" == llm && "${LLM_BACKEND}" == all ]]; then
         local engine
-        for engine in koboldcpp tabbyapi prism; do
+        for engine in koboldcpp tabbyapi prism sc117 orca; do
             with_llm_backend "${engine}" ensure_service_started llm || return 1
         done
         return 0
@@ -690,15 +724,23 @@ ensure_service_started() {
             ;;
         proxy)
             log "starting proxy in ${SCRIPT_DIR}"
+            local default_model
             local -a cache_args=()
             if (( ${#PROXY_ROUTER_ARGS} )); then
                 cache_args=(--kobold-model-cache "${KOBOLD_MODEL_CACHE}")
+            fi
+            if [[ -r "${KOBOLD_DEFAULT_MODEL_FILE}" ]] && \
+                { (( ${#PROXY_ROUTER_ARGS} )) || [[ "${LLM_BACKEND}" == all ]]; }; then
+                IFS= read -r default_model < "${KOBOLD_DEFAULT_MODEL_FILE}" || return 1
+                cache_args+=(--kobold-default-model "${default_model}")
             fi
             launch_in_directory proxy "${SCRIPT_DIR}" 0 "${PROXY_COMMAND}" \
                 --llm-backend "${LLM_BACKEND}" \
                 --llm-url "${LLM_URL}" \
                 --tabby-url "${ST_PROXY_TABBY_URL:-http://127.0.0.1:5003}" \
                 --prism-url "${ST_PROXY_PRISM_URL:-http://127.0.0.1:5006}" \
+                --sc117-url "${ST_PROXY_SC117_URL:-http://127.0.0.1:48640}" \
+                --orca-url "${ST_PROXY_ORCA_URL:-http://127.0.0.1:48642}" \
                 --comfy-url "${COMFY_URL}" \
                 --chat-port "${PROXY_CHAT_PORT}" \
                 --image-port "${PROXY_IMAGE_PORT}" \
@@ -849,7 +891,7 @@ stop_service() {
 
     if [[ "${service}" == llm && "${LLM_BACKEND}" == all ]]; then
         local engine result=0
-        for engine in koboldcpp tabbyapi prism; do
+        for engine in koboldcpp tabbyapi prism sc117 orca; do
             with_llm_backend "${engine}" stop_service llm || result=1
         done
         return ${result}
@@ -895,10 +937,10 @@ cleanup_kobold_runtime() {
     local directory
     # Called only after managed services have stopped. Never follow profile links.
     for directory in "${RUNTIME_DIR}"/kobold-admin.*(N/); do
-        rm -f -- "${directory}"/*.kcpps(N@)
+        rm -f -- "${directory}"/*.kcpps(N@) "${directory}/bootstrap.json"
         rmdir -- "${directory}" 2>/dev/null || true
     done
-    rm -f -- "${KOBOLD_MODEL_CACHE}" "${KOBOLD_MODEL_CACHE:r}.tmp"
+    rm -f -- "${KOBOLD_MODEL_CACHE}" "${KOBOLD_MODEL_CACHE:r}.tmp" "${KOBOLD_DEFAULT_MODEL_FILE}"
 }
 
 cleanup() {
@@ -1077,14 +1119,16 @@ main() {
     elif [[ -z "${ST_PROXY_LLM_BACKEND:-}" ]]; then
         local choice
         while true; do
-            print -nru2 -- "Select LLM backend: 1) KoboldCpp  2) TabbyAPI  3) Prism [Enter: all]: "
+            print -nru2 -- "Select LLM backend: 1) KoboldCpp  2) TabbyAPI  3) Prism  4) Qwen SC117  5) Qwen Orca [Enter: all]: "
             IFS= read -r choice || choice=""
             case "${choice}" in
                 "") LLM_BACKEND=all; break ;;
                 1) LLM_BACKEND=koboldcpp; break ;;
                 2) LLM_BACKEND=tabbyapi; break ;;
                 3) LLM_BACKEND=prism; break ;;
-                *) log "enter 1, 2, 3 or leave empty for all" ;;
+                4) LLM_BACKEND=sc117; break ;;
+                5) LLM_BACKEND=orca; break ;;
+                *) log "enter 1, 2, 3, 4, 5 or leave empty for all" ;;
             esac
         done
     fi

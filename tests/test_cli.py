@@ -170,3 +170,25 @@ def test_prism_cli_and_environment_settings() -> None:
     }, clear=True):
         config = config_from_args(build_parser().parse_args(()))
     assert config.prism_model == "synthetic-prism"
+
+
+def test_strata_cli_origins_and_all_mode_overrides() -> None:
+    for kind, port in (("sc117", 48640), ("orca", 48642)):
+        config = _parse("--llm-backend", kind)
+        assert config.llm_url == f"http://127.0.0.1:{port}"
+    config = _parse("--llm-backend", "all", "--sc117-url", "http://127.0.0.1:6100",
+                    "--orca-url", "http://127.0.0.1:6101")
+    assert config.sc117_url == "http://127.0.0.1:6100"
+    assert config.orca_url == "http://127.0.0.1:6101"
+    with patch.dict(os.environ, {"ST_PROXY_SC117_URL": "http://127.0.0.1:6102",
+                                "ST_PROXY_ORCA_URL": "http://127.0.0.1:6103"}, clear=True):
+        config = config_from_args(build_parser().parse_args(()))
+    assert config.sc117_url == "http://127.0.0.1:6102"
+    assert config.orca_url == "http://127.0.0.1:6103"
+
+
+def test_kobold_default_profile_cli_and_environment() -> None:
+    assert _parse().kobold_default_model == "initial_model"
+    assert _parse("--kobold-default-model", "a.kcpps").kobold_default_model == "a.kcpps"
+    with patch.dict(os.environ, {"ST_PROXY_KOBOLD_DEFAULT_MODEL": "b.kcpps"}, clear=True):
+        assert config_from_args(build_parser().parse_args(())).kobold_default_model == "b.kcpps"

@@ -449,6 +449,8 @@ environment.
 | `--llm-backend` | `ST_PROXY_LLM_BACKEND` | `koboldcpp` | LLM lifecycle adapter |
 | `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific | Real LLM origin |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` | Real ComfyUI origin |
+| `--sc117-url` | `ST_PROXY_SC117_URL` | `http://127.0.0.1:48640` | SC117 origin in all mode |
+| `--orca-url` | `ST_PROXY_ORCA_URL` | `http://127.0.0.1:48642` | Orca origin in all mode |
 | `--prism-model` | `ST_PROXY_PRISM_MODEL` | `prism-bonsai-2-27b-abliterated` | Default Prism preset when model is omitted |
 | `--tabby-model` | `ST_PROXY_TABBY_MODEL` | unset | Native model name for a cold TabbyAPI load |
 | `--tabby-max-seq-len` | `ST_PROXY_TABBY_MAX_SEQ_LEN` | `32768` | Fallback context for the first TabbyAPI load; model profiles override |
@@ -678,7 +680,7 @@ that route to the GPU-sensitive policy before using it alongside the LLM.
 
 The repository includes `st-stack.zsh`, a Linux/Zsh supervisor tailored to the
 repository owner's local multi-service setup. It can supervise a configured
-LLM, or all three engines, and the proxy. It does not manage PocketTTS,
+LLM, or all five engines, and the proxy. It does not manage PocketTTS,
 SillyTavern, AllTalk, or ComfyUI.
 
 This script is not a portable default installation:
@@ -701,8 +703,8 @@ After adapting it to your environment:
 ./st-stack.zsh
 ```
 
-Choose **1) KoboldCpp**, **2) TabbyAPI**, or **3) Prism** for the existing
-single-engine flow. Press **Enter** to start all three; see
+Choose **1) KoboldCpp**, **2) TabbyAPI**, **3) Prism**, **4) Qwen SC117**,
+or **5) Qwen Orca** for a single engine. Press **Enter** to start all five; see
 [all-backend mode](#all-backend-mode).
 
 The interactive KoboldCpp list displays paths relative to `models` and omits
@@ -720,8 +722,10 @@ export ST_STACK_KOBOLD_CONFIG='roleplay/gemma4/role-play-no-thinking-goetia-26b'
 custom-command behavior and takes precedence over automatic KoboldCpp config
 selection.
 
-The standard KoboldCpp launch now enables native Router mode. The selection at
-startup remains the default profile, while all discovered `.kcpps` files become
+The standard KoboldCpp launch enables native Router mode with a temporary
+CPU-only configuration that loads no model. The selection at startup remains
+the default profile for the first active request (`initial_model`, or an omitted
+model in single-backend mode), while all discovered `.kcpps` files become
 available through the proxy's `/v1/models`. Choose one of those exact IDs in your
 client; KoboldCpp performs the model switch inside the proxy's GPU lease.
 One model-dependent request runs at a time, and ComfyUI waits for its complete
@@ -801,15 +805,17 @@ Press Enter at the stack's backend menu, or run:
 ST_PROXY_LLM_BACKEND=all ./st-stack.zsh
 ```
 
-The stack starts and supervises KoboldCpp, TabbyAPI and Prism with independent
-process groups. Ctrl-C and `--stop` stop all three and the proxy. Choices 1–3
-retain their single-backend behavior. ComfyUI remains separately managed.
+The stack starts and supervises KoboldCpp, TabbyAPI, Prism, Qwen SC117 and Qwen Orca
+with independent process groups. Ctrl-C and `--stop` stop all five and the proxy.
+Choices 1–5 select one backend. ComfyUI remains separately managed.
 
 Connect the client to `http://127.0.0.1:5002/v1`. `/v1/models` combines
-KoboldCpp's native router profiles, TabbyAPI's `/v1/model/list`, and Prism's
-native router presets. It does not scan model files or guess compatible
+KoboldCpp's native router profiles, TabbyAPI's `/v1/model/list`, Prism's
+native router presets, and each Strata server's `/v1/models`. It does not scan
+model files or guess compatible
 formats. IDs are namespaced, for example `koboldcpp/example.kcpps`,
-`tabbyapi/example-exl3` and `prism/example-preset`. Use the exact returned ID
+`tabbyapi/example-exl3`, `prism/example-preset`, `sc117/model` and `orca/model`.
+Use the exact returned ID
 in each model-dependent request; there is no implicit engine when `model` is
 missing. The prefix is removed before forwarding to the native API. Responses,
 including SSE and reasoning content, retain the native format.
@@ -830,9 +836,11 @@ unconfirmed load/unload blocks handoff to another engine or ComfyUI.
 ComfyUI queue and memory-settling checks also apply in all mode. No idle timer,
 catalog read or completed workflow restores a model in the background.
 
-KoboldCpp runs in Router mode and exposes the configured `.kcpps` profiles.
-`ST_STACK_KOBOLD_CONFIG` still selects its initial profile; when unset, all mode
-uses the first discovered profile without another prompt. TabbyAPI starts with
+KoboldCpp starts without a model in Router mode and exposes the configured
+`.kcpps` profiles. `ST_STACK_KOBOLD_CONFIG` selects the profile behind
+`koboldcpp/initial_model`; when unset, all mode uses the first discovered profile
+without another prompt. It loads only when an active request selects it.
+The source profiles are unchanged. TabbyAPI starts with
 empty `--model-name` and `--embedding-model-name` overrides so it does not
 compete for VRAM at startup; its configuration file is unchanged. Prism keeps
 its existing router requirements: `--models-max 1`, `--no-models-autoload`, and
@@ -841,17 +849,22 @@ model state is reconciled on the first active proxy request.
 
 For all mode, upstream origins are configured with `ST_PROXY_LLM_URL`
 (KoboldCpp, stack default `http://127.0.0.1:5001`), `ST_PROXY_TABBY_URL`
-(`http://127.0.0.1:5003`) and `ST_PROXY_PRISM_URL`
-(`http://127.0.0.1:5006`). Optional per-engine launcher overrides are
+(`http://127.0.0.1:5003`), `ST_PROXY_PRISM_URL`
+(`http://127.0.0.1:5006`), `ST_PROXY_SC117_URL` (`http://127.0.0.1:48640`),
+and `ST_PROXY_ORCA_URL` (`http://127.0.0.1:48642`).
+Optional per-engine launcher overrides are
 `ST_STACK_KOBOLDCPP_DIR` / `ST_STACK_KOBOLDCPP_COMMAND`,
-`ST_STACK_TABBYAPI_DIR` / `ST_STACK_TABBYAPI_COMMAND`, and
-`ST_STACK_PRISM_DIR` / `ST_STACK_PRISM_COMMAND`. Custom commands must preserve
+`ST_STACK_TABBYAPI_DIR` / `ST_STACK_TABBYAPI_COMMAND`,
+`ST_STACK_PRISM_DIR` / `ST_STACK_PRISM_COMMAND`,
+`ST_STACK_SC117_DIR` / `ST_STACK_SC117_COMMAND`, and
+`ST_STACK_ORCA_DIR` / `ST_STACK_ORCA_COMMAND`. Custom commands must preserve
 the corresponding native lifecycle contract and accept the Tabby startup
 overrides. The generic `ST_STACK_LLM_DIR` and `ST_STACK_LLM_COMMAND` remain
 single-engine settings.
 
 To start only the proxy against existing services, use `--llm-backend all`,
-`--llm-url`, `--tabby-url` and `--prism-url`. Set listener ports explicitly when
+`--llm-url`, `--tabby-url`, `--prism-url`, `--sc117-url` and `--orca-url`.
+Set listener ports explicitly when
 using the stack port layout. `/broker/status` includes `active_llm_backend`
 and the namespaced `active_model`; `llm_reserved` denotes the shared reservation,
 including native KoboldCpp inline loading. Lifecycle/admin routes and
@@ -860,7 +873,7 @@ including native KoboldCpp inline loading. Lifecycle/admin routes and
 ## TabbyAPI / ExLlamaV3
 
 Choose TabbyAPI in the stack's first menu, or set `ST_PROXY_LLM_BACKEND=tabbyapi`.
-Enter starts all three engines. `--stop` skips the menu and remembers the supervised
+Enter starts all five engines. `--stop` skips the menu and remembers the supervised
 backend choice. The existing KoboldCpp configuration selection and Router mode
 are unchanged. Ollama remains available through its existing environment setting.
 
@@ -1145,3 +1158,39 @@ cancellation tests (full suite: 184 tests, 60 subtests), plus passive discovery
 through the installed native router on temporary ports. Real two-model GPU
 switching and full 64k context have not been tested. Restart both the proxy and
 Prism to activate the updated presets and routing.
+
+
+## Qwen SC117 and Orca / Strata
+
+The stack uses the optimized installations in `~/git/qwen-next-server`:
+
+| Choice | Backend | Launcher | Native API port |
+| --- | --- | --- | --- |
+| 4 | `sc117` | `start-server.sh --lazy` | 48640 |
+| 5 | `orca` | `start-orca.sh --lazy` | 48642 |
+
+Both are also included by Enter / `ST_PROXY_LLM_BACKEND=all`. For a single
+backend, use `ST_PROXY_LLM_BACKEND=sc117` or `ST_PROXY_LLM_BACKEND=orca`.
+The launchers now accept `--lazy`; calling them directly without that flag
+retains their original immediate-loading behavior. Optimized model settings,
+expert budgets, sampling, thinking defaults and model files are unchanged.
+
+In all mode the model IDs are:
+
+- `sc117/sc117-qwen3.8-flash-next-gsq-rco-abliterated-iq3_xxs`
+- `orca/orcarouter-qwen3.8-flash-next-uncensored-iq3_xxs`
+
+The actual catalog comes from each native API. Single-backend mode uses its
+unprefixed native ID and defaults to that model if the request omits `model`.
+Startup, readiness checks and model discovery do not load either model.
+An active request uses Strata's synchronous `/v1/load`; switching to another
+engine or ComfyUI requires `/v1/unload` acknowledgment and unloaded health.
+Failed, timed-out or cancelled lifecycle calls block further GPU handoff until
+the uncertain backend state is resolved and the proxy is restarted.
+
+Chat Completions, `/v1/messages` and `/v1/messages/count_tokens` use the shared
+queue. Request sampling/thinking fields and streamed responses pass through
+without TabbyAPI or Prism-specific transformations. Direct load/unload and
+settings calls through the proxy are blocked. These are text-only profiles.
+Use the proxy endpoint for coordinated requests; direct native API requests
+are outside its GPU lease.

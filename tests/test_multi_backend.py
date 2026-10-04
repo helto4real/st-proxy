@@ -13,6 +13,7 @@ from st_proxy.config import BrokerConfig, TestEndpointRegistry
 from st_proxy.errors import ConfigurationError
 from st_proxy.service import BrokerService
 
+from .strata_support import MockStrata
 from .support import DynamicServer, prompt_payload, wait_until
 from .tabby_support import MockTabby
 from .test_comfy_cleanup import CleanupComfy
@@ -28,13 +29,16 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.tabby = MockTabby()
         self.tabby.model = "inactive"
         self.prism = MockPrism()
+        self.sc117 = MockStrata("synthetic-sc117")
+        self.orca = MockStrata("synthetic-orca")
         self.comfy = CleanupComfy()
         self.servers = []
         self.events = []
         registry = TestEndpointRegistry()
         origins = {}
         for engine, mock in (("koboldcpp", self.kobold), ("tabbyapi", self.tabby),
-                             ("prism", self.prism), ("comfy", self.comfy)):
+                             ("prism", self.prism), ("sc117", self.sc117),
+                             ("orca", self.orca), ("comfy", self.comfy)):
             app = mock.app()
             app.middlewares.append(self.guard(engine))
             server = DynamicServer(app)
@@ -43,7 +47,7 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.config = BrokerConfig.for_test(
             llm_backend="all", llm_url=origins["koboldcpp"], tabby_url=origins["tabbyapi"],
             prism_url=origins["prism"], comfy_url=origins["comfy"], registry=registry,
-            prism_model=self.prism.model,
+            prism_model=self.prism.model, sc117_url=origins["sc117"], orca_url=origins["orca"],
         )
         self.service = BrokerService(self.config)
         await self.service.start()
@@ -51,31 +55,38 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.url = f"http://127.0.0.1:{self.service.chat_port}"
         self.image_url = f"http://127.0.0.1:{self.service.image_port}"
         self.models = {"koboldcpp": "koboldcpp/a.kcpps", "tabbyapi": "tabbyapi/synthetic-exl3",
-                       "prism": f"prism/{self.prism.model}"}
+                       "prism": f"prism/{self.prism.model}",
+                       "sc117": f"sc117/{self.sc117.model}", "orca": f"orca/{self.orca.model}"}
 
     def guard(self, engine):
         @web.middleware
         async def middleware(request, handler):
             self.events.append((engine, request.method, request.path))
             if request.path in {"/v1/chat/completions", "/v1/model/load", "/models/load",
-                                "/prompt"}:
+                                "/v1/load", "/prompt"}:
                 if engine != "koboldcpp":
                     self.assertEqual(self.kobold.model, "inactive")
                 if engine != "tabbyapi":
                     self.assertEqual(self.tabby.model, "inactive")
                 if engine != "prism":
                     self.assertTrue(all(s == "unloaded" for s in self.prism.states.values()))
+                if engine != "sc117":
+                    self.assertFalse(self.sc117.loaded)
+                if engine != "orca":
+                    self.assertFalse(self.orca.loaded)
                 if engine != "comfy":
                     self.assertTrue(all(event.is_set() for event in self.comfy.completion.values()))
             return await handler(request)
         return middleware
 
     async def asyncTearDown(self):
-        for mock in (self.kobold, self.tabby, self.prism):
+        for mock in (self.kobold, self.tabby, self.prism, self.sc117, self.orca):
             mock.chat_release.set()
         self.kobold.load_gate.set()
         self.tabby.load_release.set()
         self.prism.confirm.set()
+        self.sc117.confirm.set()
+        self.orca.confirm.set()
         for event in self.comfy.completion.values():
             event.set()
         await self.service.stop()
@@ -102,7 +113,8 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
             cards = (await response.json())["data"]
         expected = {"koboldcpp/initial_model", "koboldcpp/a.kcpps", "koboldcpp/b.kcpps",
                     "tabbyapi/synthetic-exl3", "tabbyapi/another-exl3",
-                    f"prism/{self.prism.model}", f"prism/{self.prism.other}"}
+                    f"prism/{self.prism.model}", f"prism/{self.prism.other}",
+                    f"sc117/{self.sc117.model}", f"orca/{self.orca.model}"}
         self.assertEqual({card["id"] for card in cards}, expected)
         self.assertFalse(any(method == "POST" for _, method, _ in self.events))
         self.assertEqual(self.service.coordinator.status()["state"], "awaiting_request")
@@ -112,7 +124,7 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("tabbyapi/new/native-model",
                           {card["id"] for card in (await response.json())["data"]})
 
-    async def test_all_six_cross_engine_directions_and_native_model_translation(self):
+    async def test_all_twenty_cross_engine_directions_and_native_model_translation(self):
         for source, destination in itertools.permutations(self.models, 2):
             with self.subTest(source=source, destination=destination):
                 self.assertEqual((await self.chat(self.models[source]))[0], 200)
@@ -123,6 +135,8 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
                          {"synthetic-exl3"})
         self.assertEqual({json.loads(body)["model"] for body in self.prism.chat_payloads},
                          {self.prism.model})
+        for mock in (self.sc117, self.orca):
+            self.assertEqual({payload["model"] for payload in mock.payloads}, {mock.model})
         self.assertEqual(self.comfy.free_calls, 1)
 
     async def test_each_engine_to_comfy_and_next_engine_without_background_restore(self):
@@ -137,7 +151,7 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.status, 200)
                 await asyncio.sleep(0.02)
                 self.assertEqual([event for event in self.events if event[1] == "POST"], before)
-                next_engine = list(self.models)[(index + 1) % 3]
+                next_engine = list(self.models)[(index + 1) % len(self.models)]
                 self.assertEqual((await self.chat(self.models[next_engine]))[0], 200)
 
     async def test_stream_blocks_switch_and_preserves_fifo_with_image(self):
@@ -188,6 +202,8 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tabby.loads, [])
         self.assertFalse(task.done())
         self.prism.confirm.set()
+        self.sc117.confirm.set()
+        self.orca.confirm.set()
         self.assertEqual((await task)[0], 200)
 
     async def test_tabby_failed_switch_can_retry_the_requested_model(self):
@@ -218,6 +234,7 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.kobold.model = "preexisting"
         self.tabby.model = "synthetic-exl3"
         self.prism.states[self.prism.other] = "loaded"
+        self.sc117.loaded = self.orca.loaded = True
         self.assertEqual(await self.image(), 200)
         self.assertEqual(self.kobold.admin_calls, ["unload_model"])
         self.assertEqual(self.tabby.unloads, 1)
@@ -236,7 +253,7 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(method == "POST" for _, method, _ in self.events))
 
     async def test_test_mode_rejects_any_unregistered_engine(self):
-        for field in ("llm_url", "tabby_url", "prism_url"):
+        for field in ("llm_url", "tabby_url", "prism_url", "sc117_url", "orca_url"):
             with self.subTest(field=field), self.assertRaises(ConfigurationError):
                 replace(self.config, **{field: "http://127.0.0.1:65500"})
 
@@ -319,12 +336,14 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.comfy.auto_complete = False
         self.assertEqual(await self.image(), 200)
         tasks = [asyncio.create_task(self.chat(model)) for model in self.models.values()]
-        await wait_until(lambda: self.service.coordinator.status()["waiting_chats"] == 3)
+        await wait_until(
+            lambda: self.service.coordinator.status()["waiting_chats"] == len(self.models))
         self.assertEqual(self.tabby.loads, [])
         self.assertEqual(self.prism.operations, [])
         self.assertEqual(self.kobold.selected, [])
         self.comfy.completion[self.comfy.prompt_calls[0]].set()
-        self.assertEqual([result[0] for result in await asyncio.gather(*tasks)], [200, 200, 200])
+        self.assertEqual([result[0] for result in await asyncio.gather(*tasks)],
+                         [200] * len(self.models))
 
     async def test_identical_native_ids_are_unambiguous_and_bounds_checked(self):
         self.tabby.available_models.append(self.prism.model)
@@ -360,3 +379,56 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         await response.read()
         response.close()
         self.assertIn("abort", self.kobold.events)
+
+    async def test_strata_failure_blocks_other_backends_and_comfy(self):
+        self.assertEqual((await self.chat(self.models["sc117"]))[0], 200)
+        self.sc117.fail_action = "unload"
+        self.assertEqual((await self.chat(self.models["orca"]))[0], 503)
+        self.assertEqual(await self.image(), 503)
+        self.assertEqual(self.orca.operations, [])
+        self.assertEqual(self.comfy.prompt_calls, [])
+
+    async def test_strata_load_failure_keeps_ownership_uncertain(self):
+        self.sc117.fail_action = "load"
+        self.assertEqual((await self.chat(self.models["sc117"]))[0], 503)
+        self.assertEqual((await self.chat(self.models["orca"]))[0], 503)
+        self.assertEqual(await self.image(), 503)
+        self.assertEqual(self.orca.operations, [])
+
+    async def test_strata_unload_ack_precedes_switch(self):
+        self.assertEqual((await self.chat(self.models["sc117"]))[0], 200)
+        self.sc117.confirm.clear()
+        switch = asyncio.create_task(self.chat(self.models["orca"]))
+        await wait_until(lambda: self.sc117.operations == ["load", "unload"])
+        self.assertEqual(self.orca.operations, [])
+        self.assertFalse(switch.done())
+        self.sc117.confirm.set()
+        self.assertEqual((await switch)[0], 200)
+
+    async def test_strata_stream_holds_gpu_until_response_finishes(self):
+        self.orca.hold_chat = True
+        response = await self.client.post(self.url + "/v1/chat/completions", json={
+            "model": self.models["orca"], "stream": True,
+        })
+        await self.orca.chat_started.wait()
+        sequence = self.service.coordinator._sequence
+        switch = asyncio.create_task(self.chat(self.models["sc117"]))
+        await wait_until(lambda: self.service.coordinator._sequence > sequence)
+        self.assertFalse(switch.done())
+        self.assertEqual(self.orca.operations, ["load"])
+        self.assertEqual(self.sc117.operations, [])
+        self.orca.chat_release.set()
+        self.assertEqual(await response.read(), b"data: synthetic-one\n\ndata: synthetic-two\n\n")
+        response.close()
+        self.assertEqual((await switch)[0], 200)
+        self.assertEqual(self.orca.operations, ["load", "unload"])
+
+    async def test_cold_kobold_initial_alias_loads_selected_profile_only_on_request(self):
+        self.service.config = replace(self.config, kobold_default_model="a.kcpps")
+        await check_backend(self.config, 1)
+        self.assertEqual(self.kobold.loads, [])
+        self.assertEqual((await self.chat("koboldcpp/initial_model"))[0], 200)
+        self.assertEqual(self.kobold.selected, ["a.kcpps"])
+        self.assertEqual((await self.chat(self.models["orca"]))[0], 200)
+        self.assertEqual((await self.chat("koboldcpp/initial_model"))[0], 200)
+        self.assertEqual(self.kobold.selected, ["a.kcpps", "a.kcpps"])

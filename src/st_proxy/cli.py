@@ -20,6 +20,7 @@ from .llm import (
     build_llm_backend,
 )
 from .llm.koboldcpp import KoboldCppBackend
+from .llm.strata import STRATA_KINDS
 from .service import BrokerService
 
 LOG = logging.getLogger(__name__)
@@ -77,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--comfy-url", default=_env("COMFY_URL", "http://127.0.0.1:8189"))
     parser.add_argument("--tabby-url", default=_env("TABBY_URL", "http://127.0.0.1:5003"))
     parser.add_argument("--prism-url", default=_env("PRISM_URL", "http://127.0.0.1:5006"))
+    parser.add_argument("--sc117-url", default=_env("SC117_URL", "http://127.0.0.1:48640"))
+    parser.add_argument("--orca-url", default=_env("ORCA_URL", "http://127.0.0.1:48642"))
     parser.add_argument(
         "--kobold-admin-password",
         default=_env("KOBOLD_ADMIN_PASSWORD"),
@@ -86,6 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kobold-router-mode", action="store_true",
                         default=_env_bool("KOBOLD_ROUTER_MODE"))
     parser.add_argument("--kobold-model-cache", default=_env("KOBOLD_MODEL_CACHE"))
+    parser.add_argument("--kobold-default-model",
+                        default=_env("KOBOLD_DEFAULT_MODEL", "initial_model"),
+                        help="Native router profile used for initial_model and omitted model")
     parser.add_argument("--prism-model",
                         default=_env("PRISM_MODEL", "prism-bonsai-2-27b-abliterated"),
                         help="Default Prism router preset when the request omits model")
@@ -183,10 +189,13 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         llm_url=llm_url,
         tabby_url=args.tabby_url,
         prism_url=args.prism_url,
+        sc117_url=args.sc117_url,
+        orca_url=args.orca_url,
         comfy_url=args.comfy_url,
         kobold_admin_password=args.kobold_admin_password,
         kobold_router_mode=args.kobold_router_mode,
         kobold_model_cache=args.kobold_model_cache,
+        kobold_default_model=args.kobold_default_model,
         prism_model=args.prism_model,
         tabby_model=args.tabby_model,
         tabby_max_seq_len=args.tabby_max_seq_len,
@@ -235,7 +244,9 @@ async def check_backend(
     ) as session:
         backend = build_llm_backend(session, check_config)
         await backend.validate_control()
-        if config.llm_backend in {"tabbyapi", "prism", "all"}:
+        if config.kobold_router_mode or config.llm_backend in {
+            "tabbyapi", "prism", "all", *STRATA_KINDS,
+        }:
             # Server readiness must not require (or trigger) a model load.
             await backend.observe_ready()
         else:

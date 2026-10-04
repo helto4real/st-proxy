@@ -55,11 +55,13 @@ def read_model_cache(filename: str | None) -> dict[str, Any]:
         raise ConfigurationError("cannot read KoboldCpp model cache") from exc
 
 
-def default_model_body(body: bytes) -> bytes:
+def default_model_body(body: bytes, default_model: str = "initial_model") -> bytes:
     payload = json.loads(body)
     if not isinstance(payload, dict):
         raise ValueError("request body must be a JSON object")
-    if payload.get("model") in (None, ""):
-        payload["model"] = "initial_model"
+    if payload.get("model") in (None, "") or (
+        payload.get("model") == "initial_model" and default_model != "initial_model"
+    ):
+        payload["model"] = default_model
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
     return body

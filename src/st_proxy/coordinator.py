@@ -15,6 +15,7 @@ from .config import BrokerConfig
 from .errors import ChatUnavailable, HandoffError, InsufficientVram, QueueFull
 from .http import BufferedResponse
 from .llm import LlmBackend, RestorePoint
+from .llm.strata import STRATA_KINDS
 
 LOG = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ class HandoffCoordinator:
     async def initialize(self) -> bool:
         """Start coordination without activating request-driven backends in the background."""
         LOG.info("broker initialization started")
-        if self._llm.info.kind in {"koboldcpp", "tabbyapi", "prism", "all"}:
+        if self._llm.info.kind in {"koboldcpp", "tabbyapi", "prism", "all", *STRATA_KINDS}:
             async with self._condition:
                 self._owner = GpuOwner.UNKNOWN
                 self._set_state(HandoffState.AWAITING_REQUEST)
@@ -469,7 +470,9 @@ class HandoffCoordinator:
     async def _dispatch_chat(self, work: ChatWork) -> None:
         if work.cancelled:
             return
-        if self._config.kobold_router_mode or self._llm.info.kind in {"prism", "all"}:
+        if self._config.kobold_router_mode or self._llm.info.kind in {
+            "prism", "all", *STRATA_KINDS,
+        }:
             async with self._condition:
                 while self._active_chats or self._active_llm_metadata:
                     await self._condition.wait()
@@ -507,7 +510,7 @@ class HandoffCoordinator:
             self._active_chats += 1
             if self._config.kobold_router_mode or self._llm.info.kind == "all":
                 self._set_state(HandoffState.LLM_RESERVED)
-            elif self._llm.info.kind == "prism":
+            elif self._llm.info.kind in {"prism", *STRATA_KINDS}:
                 self._set_state(HandoffState.LLM_READY)
             LOG.debug(
                 "chat lease granted: sequence=%s active_chats=%s",
@@ -625,7 +628,7 @@ class HandoffCoordinator:
             return True
 
         if (
-            self._llm.info.kind in {"koboldcpp", "tabbyapi", "prism", "all"}
+            self._llm.info.kind in {"koboldcpp", "tabbyapi", "prism", "all", *STRATA_KINDS}
             and self._owner is GpuOwner.UNKNOWN
         ):
             await self._ensure_control_validated()
@@ -706,7 +709,7 @@ class HandoffCoordinator:
                 self._owner = GpuOwner.LLM
             elif (
                 self._restore_point is None
-                and self._llm.info.kind in {"koboldcpp", "tabbyapi", "prism", "all"}
+                and self._llm.info.kind in {"koboldcpp", "tabbyapi", "prism", "all", *STRATA_KINDS}
                 # After a failed cold load, Tabby's acquisition path must reconcile
                 # lifecycle state; ordinary observation cannot authorize a retry.
                 and not (self._llm.info.kind == "tabbyapi" and self._recoverable_error)

@@ -11,11 +11,13 @@ Supported LLM backends:
 - Ollama, controlled through `/api/ps` and the `keep_alive` lifecycle API.
 - Prism, controlled through the native llama-server router load/unload API.
   Choose **3) Prism** in `st-stack.zsh`; see [Prism setup](docs/USER_GUIDE.md#prism--ternary-bonsai).
+- Qwen SC117 and Qwen Orca, controlled through Strata’s native load/unload API.
+  Choose **4) Qwen SC117** or **5) Qwen Orca**; both start unloaded.
 
-In `st-stack.zsh`, **Enter starts KoboldCpp, TabbyAPI and Prism together**;
-choices **1–3** still select a single engine. All mode publishes their native
+In `st-stack.zsh`, **Enter starts all five backends together**;
+choices **1–5** select a single engine. All mode publishes their native
 model catalogs through one `/v1/models`, using `koboldcpp/…`, `tabbyapi/…` and
-`prism/…` IDs. Select an exact returned ID in the client. One shared FIFO keeps
+`prism/…`, `sc117/…` and `orca/…` IDs. Select an exact returned ID in the client. One shared FIFO keeps
 model loading, complete streamed responses and ComfyUI workflows mutually
 exclusive on the GPU. See [all-backend setup](docs/USER_GUIDE.md#all-backend-mode).
 
@@ -144,6 +146,8 @@ one model-dependent request at a time and holds the reservation throughout
 loading, generation and the complete upstream response, including disconnected
 streams. It does not restore `initial_model` before forwarding a selected model.
 Missing/null/empty text-request model fields use `initial_model`.
+`--kobold-default-model` can map that alias to a native `.kcpps` profile when
+the router starts without a model.
 
 Start KoboldCpp with `--admin --routermode --admindir /path/to/profiles` in
 addition to the normal startup configuration. Then export a passive model cache
@@ -184,8 +188,11 @@ request, capped by `--max-chat-body-bytes` (32 MiB by default). Queueing clients
 are not eagerly read into full request buffers. Router loading has its own
 backend timeout; the broker's `request_timeout` also bounds upstream read-idle.
 
-The standard `st-stack.zsh` KoboldCpp launch enables Router mode automatically,
-retains the selected startup profile and exposes all recursively discovered
+The standard `st-stack.zsh` KoboldCpp launch enables Router mode automatically
+and starts with a temporary CPU-only, model-free bootstrap configuration.
+The selected profile becomes the `initial_model` alias and loads only for an
+active model-dependent request. Startup readiness and catalog export are passive.
+The stack exposes all recursively discovered
 profiles through temporary flat symlinks. Profile IDs use the original basename
 plus a stable relative-path hash, avoiding collisions between subdirectories.
 The script exports the initial cache during readiness. Original profiles and
@@ -329,6 +336,7 @@ Every command-line setting has an `ST_PROXY_...` environment equivalent.
 | `--kobold-admin-password` | `ST_PROXY_KOBOLD_ADMIN_PASSWORD` | unset |
 | `--kobold-router-mode` | `ST_PROXY_KOBOLD_ROUTER_MODE` | disabled (standard stack launch enables it) |
 | `--kobold-model-cache` | `ST_PROXY_KOBOLD_MODEL_CACHE` | unset |
+| `--kobold-default-model` | `ST_PROXY_KOBOLD_DEFAULT_MODEL` | `initial_model` (stack sets the selected profile) |
 | `--max-chat-body-bytes` | `ST_PROXY_MAX_CHAT_BODY_BYTES` | `33554432` |
 | `--write-kobold-model-cache` | — | explicit export with `--check-backend` |
 | `--connect-timeout` | `ST_PROXY_CONNECT_TIMEOUT` | `30` seconds |

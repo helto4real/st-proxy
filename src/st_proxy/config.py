@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .errors import ConfigurationError
 
-CONVENTIONAL_TEST_UNSAFE_PORTS = frozenset({5001, 5002, 5003, 5006, 8188, 8189})
+CONVENTIONAL_TEST_UNSAFE_PORTS = frozenset({5001, 5002, 5003, 5006, 8188, 8189, 48640, 48642})
 
 
 def normalize_origin(value: str) -> str:
@@ -68,11 +68,14 @@ class BrokerConfig:
     llm_url: str = ""
     tabby_url: str = "http://127.0.0.1:5003"
     prism_url: str = "http://127.0.0.1:5006"
+    sc117_url: str = "http://127.0.0.1:48640"
+    orca_url: str = "http://127.0.0.1:48642"
     kobold_url: InitVar[str | None] = None
     comfy_url: str = "http://127.0.0.1:8189"
     kobold_admin_password: str | None = None
     kobold_router_mode: bool = False
     kobold_model_cache: str | None = None
+    kobold_default_model: str = "initial_model"
     prism_model: str = "prism-bonsai-2-27b-abliterated"
     tabby_model: str | None = None
     tabby_max_seq_len: int = 32768
@@ -96,6 +99,8 @@ class BrokerConfig:
     test_registry: TestEndpointRegistry | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self, kobold_url: str | None) -> None:
+        if not self.kobold_default_model.strip():
+            raise ConfigurationError("kobold_default_model cannot be empty")
         if not self.prism_model.strip():
             raise ConfigurationError("prism_model cannot be empty")
         if not self.llm_backend:
@@ -109,9 +114,11 @@ class BrokerConfig:
                 raise ConfigurationError("llm_url and kobold_url cannot disagree")
         llm_url = kobold_url or self.llm_url or backend_default_origin(self.llm_backend)
         object.__setattr__(self, "llm_url", normalize_origin(llm_url))
-        for name in ("tabby_url", "prism_url"):
+        for name in ("tabby_url", "prism_url", "sc117_url", "orca_url"):
             object.__setattr__(self, name, normalize_origin(getattr(self, name)))
-        if self.llm_backend == "all" and len({self.llm_url, self.tabby_url, self.prism_url}) != 3:
+        if self.llm_backend == "all" and len({
+            self.llm_url, self.tabby_url, self.prism_url, self.sc117_url, self.orca_url,
+        }) != 5:
             raise ConfigurationError("all backends require distinct upstream origins")
         object.__setattr__(self, "comfy_url", normalize_origin(self.comfy_url))
         if not 0 <= self.chat_port <= 65535 or not 0 <= self.image_port <= 65535:
@@ -153,7 +160,7 @@ class BrokerConfig:
                 raise ConfigurationError("test mode requires a process-local endpoint registry")
             origins = [self.llm_url, self.comfy_url]
             if self.llm_backend == "all":
-                origins.extend((self.tabby_url, self.prism_url))
+                origins.extend((self.tabby_url, self.prism_url, self.sc117_url, self.orca_url))
             for origin in origins:
                 if not self.test_registry.contains(origin):
                     raise ConfigurationError("test mode rejected an unregistered upstream endpoint")
@@ -169,6 +176,8 @@ class BrokerConfig:
         registry: TestEndpointRegistry,
         tabby_url: str = "http://127.0.0.1:5003",
         prism_url: str = "http://127.0.0.1:5006",
+        sc117_url: str = "http://127.0.0.1:48640",
+        orca_url: str = "http://127.0.0.1:48642",
         **overrides: object,
     ) -> BrokerConfig:
         selected_llm_url = llm_url or kobold_url
@@ -181,6 +190,8 @@ class BrokerConfig:
             llm_url=selected_llm_url,
             tabby_url=tabby_url,
             prism_url=prism_url,
+            sc117_url=sc117_url,
+            orca_url=orca_url,
             comfy_url=comfy_url,
             test_mode=True,
             test_registry=registry,
