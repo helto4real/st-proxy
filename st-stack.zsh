@@ -35,7 +35,7 @@ configure_llm_backend() {
         prism)
             LLM_LABEL="Prism"
             LLM_DEFAULT_URL="http://127.0.0.1:5006"
-            LLM_DEFAULT_DIR="${HOME}/git/prism"
+            LLM_DEFAULT_DIR="${HOME}/git/local-model-runtimes/models/prism"
             LLM_DEFAULT_COMMAND="./start.sh"
             export ST_PROXY_KOBOLD_ROUTER_MODE=false
             ;;
@@ -57,6 +57,18 @@ configure_llm_backend() {
                 LLM_LABEL="Qwen Orca"
                 LLM_DEFAULT_URL="${ST_PROXY_ORCA_URL:-http://127.0.0.1:48642}"
                 LLM_DEFAULT_COMMAND="./start-orca.sh --lazy"
+            fi
+            export ST_PROXY_KOBOLD_ROUTER_MODE=false
+            ;;
+        sc117_128k|orca_128k)
+            LLM_DEFAULT_DIR="${HOME}/git/local-model-runtimes/models/qwen-next/${LLM_BACKEND/_/-}"
+            LLM_DEFAULT_COMMAND="./start.sh --lazy"
+            if [[ "${LLM_BACKEND}" == sc117_128k ]]; then
+                LLM_LABEL="Qwen SC117 128k"
+                LLM_DEFAULT_URL="${ST_PROXY_SC117_128K_URL:-http://127.0.0.1:48644}"
+            else
+                LLM_LABEL="Qwen Orca 128k"
+                LLM_DEFAULT_URL="${ST_PROXY_ORCA_128K_URL:-http://127.0.0.1:48646}"
             fi
             export ST_PROXY_KOBOLD_ROUTER_MODE=false
             ;;
@@ -104,6 +116,12 @@ configure_llm_backend() {
             fi
         fi
     fi
+    if [[ "${LLM_BACKEND}" == sc117_128k || "${LLM_BACKEND}" == orca_128k ]] && (( ! LLM_COMMAND_EXPLICIT )); then
+        LLM_COMMAND_NAME="launch.py"
+        if [[ "${LLM_URL}" =~ '^https?://[^/:]+:([0-9]+)(/.*)?$' ]]; then
+            LLM_COMMAND+=(--port "${match[1]}")
+        fi
+    fi
     typeset -g KOBOLD_CONFIG_DIR="${ST_STACK_KOBOLD_CONFIG_DIR:-${LLM_DIR}/models}"
     typeset -g KOBOLD_CONFIG_SETTING="${ST_STACK_KOBOLD_CONFIG:-}"
     typeset -g KOBOLD_SELECTED_CONFIG=""
@@ -145,6 +163,8 @@ with_llm_backend() (
         prism) export ST_PROXY_LLM_URL="${ST_PROXY_PRISM_URL:-http://127.0.0.1:5006}" ;;
         sc117) export ST_PROXY_LLM_URL="${ST_PROXY_SC117_URL:-http://127.0.0.1:48640}" ;;
         orca) export ST_PROXY_LLM_URL="${ST_PROXY_ORCA_URL:-http://127.0.0.1:48642}" ;;
+        sc117_128k) export ST_PROXY_LLM_URL="${ST_PROXY_SC117_128K_URL:-http://127.0.0.1:48644}" ;;
+        orca_128k) export ST_PROXY_LLM_URL="${ST_PROXY_ORCA_128K_URL:-http://127.0.0.1:48646}" ;;
     esac
     configure_llm_backend || return 1
     if [[ "${LLM_URL}" =~ '^https?://[^/:]+:([0-9]+)(/.*)?$' ]]; then
@@ -178,6 +198,10 @@ typeset -g START_TIMEOUT="${ST_STACK_START_TIMEOUT:-60}"
 typeset -g STOP_TIMEOUT="${ST_STACK_STOP_TIMEOUT:-10}"
 typeset -g PROXY_CHAT_PORT="${ST_PROXY_CHAT_PORT:-5002}"
 typeset -g PROXY_IMAGE_PORT="${ST_PROXY_IMAGE_PORT:-8189}"
+typeset -g PROXY_MCP_PORT="${ST_PROXY_MCP_PORT:-8190}"
+typeset -g MCP_WORKFLOWS_DIR="${ST_PROXY_MCP_WORKFLOWS_DIR:-${SCRIPT_DIR}/workflows}"
+typeset -g MCP_OUTPUT_DIR="${ST_PROXY_MCP_OUTPUT_DIR:-/run/media/veracrypt1/mcp-images}"
+typeset -g MCP_INPUT_DIR="${ST_PROXY_MCP_INPUT_DIR:-/run/media/veracrypt1/mcp-inputs}"
 typeset -g PROXY_IDLE_TIMEOUT="${ST_PROXY_IDLE_TIMEOUT:-60}"
 typeset -g LLM_PORT=""
 typeset -g POCKETTTS_PORT="${ST_STACK_POCKETTTS_PORT:-8008}"
@@ -231,6 +255,10 @@ parse_args() {
     fi
     if [[ "${PROXY_IMAGE_PORT}" != <-> ]] || (( PROXY_IMAGE_PORT < 1 || PROXY_IMAGE_PORT > 65535 )); then
         log "ST_PROXY_IMAGE_PORT must be an integer between 1 and 65535"
+        return 2
+    fi
+    if [[ "${PROXY_MCP_PORT}" != <-> ]] || (( PROXY_MCP_PORT < 1 || PROXY_MCP_PORT > 65535 )); then
+        log "ST_PROXY_MCP_PORT must be an integer between 1 and 65535"
         return 2
     fi
     if [[ "${ALLTALK_PORT}" != <-> ]] || (( ALLTALK_PORT < 1 || ALLTALK_PORT > 65535 )); then
@@ -474,13 +502,14 @@ service_running() {
 llm_ready() {
     if [[ "${LLM_BACKEND}" == all ]]; then
         local engine
-        for engine in koboldcpp tabbyapi prism sc117 orca; do
+        for engine in koboldcpp tabbyapi prism sc117 orca sc117_128k orca_128k; do
             with_llm_backend "${engine}" llm_ready || return 1
         done
         return 0
     fi
     [[ -x "${PROXY_PATH}" ]] || return 1
-    "${PROXY_PATH}" \
+    # Backend probes must not require MCP listener configuration.
+    env -u ST_PROXY_MCP_PORT "${PROXY_PATH}" \
         --check-backend \
         --backend-check-timeout 1 \
         --llm-backend "${LLM_BACKEND}" \
@@ -665,6 +694,19 @@ launch_in_directory() {
     if (( hide_output && ! SHOW_CHILD_LOGS )); then
         setsid zsh -c 'cd -- "$1" || exit 1; shift; exec "$@"' \
             st-stack-child "${directory}" "$@" >/dev/null 2>&1 &
+    elif [[ "${service}" == llm && ( "${LLM_BACKEND}" == sc117 || \
+            "${LLM_BACKEND}" == orca ) && -z "${NO_COLOR:-}" && \
+            "${TERM:-}" != dumb ]] && { [[ -t 1 ]] || [[ -t 2 ]]; }; then
+        # Filters share the backend's process group; exec preserves its tracked PID.
+        # Only terminal streams are filtered. Redirected streams stay untouched.
+        setsid zsh -c '
+            cd -- "$1" || exit 1
+            python=$2
+            shift 2
+            if [[ -t 1 ]]; then exec > >("$python" -m st_proxy.strata_logging); fi
+            if [[ -t 2 ]]; then exec 2> >("$python" -m st_proxy.strata_logging >&2); fi
+            exec "$@"
+        ' st-stack-child "${directory}" "${SCRIPT_DIR}/.venv/bin/python" "$@" &
     else
         setsid zsh -c 'cd -- "$1" || exit 1; shift; exec "$@"' \
             st-stack-child "${directory}" "$@" &
@@ -678,7 +720,7 @@ ensure_service_started() {
 
     if [[ "${service}" == llm && "${LLM_BACKEND}" == all ]]; then
         local engine
-        for engine in koboldcpp tabbyapi prism sc117 orca; do
+        for engine in koboldcpp tabbyapi prism sc117 orca sc117_128k orca_128k; do
             with_llm_backend "${engine}" ensure_service_started llm || return 1
         done
         return 0
@@ -741,9 +783,16 @@ ensure_service_started() {
                 --prism-url "${ST_PROXY_PRISM_URL:-http://127.0.0.1:5006}" \
                 --sc117-url "${ST_PROXY_SC117_URL:-http://127.0.0.1:48640}" \
                 --orca-url "${ST_PROXY_ORCA_URL:-http://127.0.0.1:48642}" \
+                --sc117-128k-url "${ST_PROXY_SC117_128K_URL:-http://127.0.0.1:48644}" \
+                --orca-128k-url "${ST_PROXY_ORCA_128K_URL:-http://127.0.0.1:48646}" \
                 --comfy-url "${COMFY_URL}" \
                 --chat-port "${PROXY_CHAT_PORT}" \
                 --image-port "${PROXY_IMAGE_PORT}" \
+                --mcp-port "${PROXY_MCP_PORT}" \
+                --mcp-workflows-dir "${MCP_WORKFLOWS_DIR}" \
+                --mcp-output-dir "${MCP_OUTPUT_DIR}" \
+                --mcp-input-dir "${MCP_INPUT_DIR}" \
+                --model-profiles "${ST_PROXY_MODEL_PROFILES-${SCRIPT_DIR}/config/model-profiles.json}" \
                 --idle-timeout "${PROXY_IDLE_TIMEOUT}" \
                 "${PROXY_ROUTER_ARGS[@]}" "${cache_args[@]}"
             ;;
@@ -891,7 +940,7 @@ stop_service() {
 
     if [[ "${service}" == llm && "${LLM_BACKEND}" == all ]]; then
         local engine result=0
-        for engine in koboldcpp tabbyapi prism sc117 orca; do
+        for engine in koboldcpp tabbyapi prism sc117 orca sc117_128k orca_128k; do
             with_llm_backend "${engine}" stop_service llm || result=1
         done
         return ${result}
@@ -1119,7 +1168,7 @@ main() {
     elif [[ -z "${ST_PROXY_LLM_BACKEND:-}" ]]; then
         local choice
         while true; do
-            print -nru2 -- "Select LLM backend: 1) KoboldCpp  2) TabbyAPI  3) Prism  4) Qwen SC117  5) Qwen Orca [Enter: all]: "
+            print -nru2 -- "Select LLM backend: 1) KoboldCpp  2) TabbyAPI  3) Prism  4) Qwen SC117  5) Qwen Orca  6) Qwen SC117 128k  7) Qwen Orca 128k [Enter: all]: "
             IFS= read -r choice || choice=""
             case "${choice}" in
                 "") LLM_BACKEND=all; break ;;
@@ -1128,7 +1177,9 @@ main() {
                 3) LLM_BACKEND=prism; break ;;
                 4) LLM_BACKEND=sc117; break ;;
                 5) LLM_BACKEND=orca; break ;;
-                *) log "enter 1, 2, 3, 4, 5 or leave empty for all" ;;
+                6) LLM_BACKEND=sc117_128k; break ;;
+                7) LLM_BACKEND=orca_128k; break ;;
+                *) log "enter 1, 2, 3, 4, 5, 6, 7 or leave empty for all" ;;
             esac
         done
     fi
@@ -1154,7 +1205,7 @@ main() {
     wait_for_dependencies || return 1
 
     if (( ${#PROXY_ROUTER_ARGS} )); then
-        "${PROXY_PATH}" --check-backend --llm-backend "${LLM_BACKEND}" \
+        env -u ST_PROXY_MCP_PORT "${PROXY_PATH}" --check-backend --llm-backend "${LLM_BACKEND}" \
             --llm-url "${LLM_URL}" "${PROXY_ROUTER_ARGS[@]}" \
             --write-kobold-model-cache "${KOBOLD_MODEL_CACHE}" || {
                 log "Router mode unavailable; restart KoboldCpp with --admin, --admindir and --routermode"

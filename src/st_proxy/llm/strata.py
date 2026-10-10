@@ -9,7 +9,7 @@ from aiohttp import ClientError, ClientSession
 from ..http import child_url
 from .base import BackendInfo, BackendTimeouts, RestorePoint, backend_error
 
-STRATA_KINDS = ("sc117", "orca")
+STRATA_KINDS = ("sc117", "orca", "sc117_128k", "orca_128k")
 STRATA_TEXT_PATHS = frozenset({
     "/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens",
 })

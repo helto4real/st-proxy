@@ -95,6 +95,10 @@ _BACKENDS = {
     ),
     "sc117": BackendSpec("sc117", "Qwen SC117", "http://127.0.0.1:48640", _build_strata),
     "orca": BackendSpec("orca", "Qwen Orca", "http://127.0.0.1:48642", _build_strata),
+    "sc117_128k": BackendSpec(
+        "sc117_128k", "Qwen SC117 128k", "http://127.0.0.1:48644", _build_strata),
+    "orca_128k": BackendSpec(
+        "orca_128k", "Qwen Orca 128k", "http://127.0.0.1:48646", _build_strata),
     "prism": BackendSpec("prism", "Prism", "http://127.0.0.1:5006", _build_prism),
     "tabbyapi": BackendSpec(
         "tabbyapi", "TabbyAPI", "http://127.0.0.1:5003", _build_tabbyapi,
@@ -136,6 +140,10 @@ def build_llm_backend(
                 config, llm_backend="sc117", llm_url=config.sc117_url)),
             "orca": _build_strata(session, replace(
                 config, llm_backend="orca", llm_url=config.orca_url)),
+            "sc117_128k": _build_strata(session, replace(
+                config, llm_backend="sc117_128k", llm_url=config.sc117_128k_url)),
+            "orca_128k": _build_strata(session, replace(
+                config, llm_backend="orca_128k", llm_url=config.orca_128k_url)),
             "prism": _build_prism(session, replace(
                 config, llm_backend="prism", llm_url=config.prism_url)),
         })

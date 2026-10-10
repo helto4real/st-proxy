@@ -13,7 +13,7 @@ from .comfy import ComfyClient
 from .comfy_routes import ComfyRouteKind, classify_comfy_route, comfy_upstream_path
 from .config import BrokerConfig
 from .coordinator import HandoffCoordinator
-from .errors import BrokerError, ChatUnavailable, HandoffError, QueueFull
+from .errors import BrokerError, ChatUnavailable, ConfigurationError, HandoffError, QueueFull
 from .http import BufferedResponse, proxy_stream, proxy_websocket, upstream_request_headers
 from .kobold_router import ABORT_PATH, TEXT_PATHS, default_model_body, read_model_cache
 from .llm import LlmBackend, build_llm_backend
@@ -23,6 +23,9 @@ from .llm.prism import PrismBackend, PrismRestorePoint
 from .llm.prism_diagnostics import PrismDiagnostics, request_usage
 from .llm.strata import STRATA_TEXT_PATHS, StrataBackend, StrataRestorePoint
 from .llm.tabbyapi import adapt_chat_request
+from .media_jobs import MediaJobs
+from .model_profiles import ModelProfiles
+from .workflows import WorkflowCatalog
 
 LOG = logging.getLogger(__name__)
 STATUS_PATH = "/broker/status"
@@ -136,12 +139,15 @@ async def _read_workflow_body(request: web.Request, max_bytes: int) -> bytes:
 class BrokerService:
     def __init__(self, config: BrokerConfig) -> None:
         self.config = config
+        self.model_profiles = ModelProfiles()
         self.control_session: ClientSession | None = None
         self.chat_session: ClientSession | None = None
         self.image_session: ClientSession | None = None
         self.websocket_session: ClientSession | None = None
         self.llm: LlmBackend[Any] | None = None
         self.coordinator: HandoffCoordinator | None = None
+        self.media_jobs: MediaJobs | None = None
+        self.mcp_listener = None
         self._chat_runner: web.AppRunner | None = None
         self._image_runner: web.AppRunner | None = None
         self._chat_site: web.TCPSite | None = None
@@ -215,6 +221,17 @@ class BrokerService:
 
     async def start(self) -> None:
         try:
+            self.model_profiles = await asyncio.to_thread(ModelProfiles, self.config.model_profiles)
+            catalog = None
+            if self.config.mcp_port is not None:
+                try:
+                    from .mcp_server import McpListener
+                except ImportError:
+                    raise ConfigurationError("MCP requires installation with .[mcp]") from None
+                catalog = await asyncio.to_thread(
+                    WorkflowCatalog, self.config.mcp_workflows_dir,
+                    self.config.max_workflow_body_bytes,
+                )
             self.control_session = self._new_session(
                 CONTROL_CONNECTION_LIMIT,
                 force_close=True,
@@ -251,6 +268,14 @@ class BrokerService:
             )
             await self._chat_site.start()
             await self._image_site.start()
+            if catalog is not None:
+                self.media_jobs = MediaJobs(self.config, catalog, self.coordinator,
+                                            self.image_session)
+                await self.media_jobs.start()
+                self.mcp_listener = McpListener(
+                    self.media_jobs, self.config.mcp_port, self.config.mcp_token,
+                )
+                await self.mcp_listener.start()
         except BaseException:
             await self.stop()
             raise
@@ -361,7 +386,13 @@ class BrokerService:
                         and request.method == "POST"
                         and request.path.rstrip("/") == "/v1/chat/completions"
                     ):
-                        body = adapt_chat_request(await self._chat_body(request))
+                        body = self.model_profiles.apply_body(
+                            await self._chat_body(request), self.llm.info.kind,
+                        )
+                        body = adapt_chat_request(body)
+                        if len(body) > self.config.max_chat_body_bytes:
+                            raise web.HTTPRequestEntityTooLarge(
+                                max_size=self.config.max_chat_body_bytes, actual_size=len(body))
                         LOG.info(
                             "TabbyAPI request: reasoning_effort=%s max_tokens=%s "
                             "reasoning_budget_tokens=%s",
@@ -469,6 +500,11 @@ class BrokerService:
             raise web.HTTPForbidden(text="unsupported model request in all-backend mode")
         if payload is None:
             raise web.HTTPBadRequest(text="expected a JSON object with model")
+        if path == "/v1/chat/completions":
+            profiled = self.model_profiles.apply(payload, target.engine, target.model)
+            if profiled is not payload:
+                payload = profiled
+                body = json.dumps(payload, ensure_ascii=False).encode()
         if target.engine == "koboldcpp":
             body = default_model_body(body, self.config.kobold_default_model)
         if target.engine == "tabbyapi" and path == "/v1/chat/completions":
@@ -588,6 +624,11 @@ class BrokerService:
         if payload is not None and model is None:
             payload["model"] = target.model
             body = json.dumps(payload).encode()
+        if request.method == "POST" and path == "/v1/chat/completions" and payload is not None:
+            profiled = self.model_profiles.apply(payload, self.llm.info.kind, target.model)
+            if profiled is not payload:
+                payload = profiled
+                body = json.dumps(payload, ensure_ascii=False).encode()
         if not strata and payload is not None and path == "/v1/chat/completions":
             body = request_usage(payload)
         if len(body) > self.config.max_chat_body_bytes:
@@ -906,9 +947,17 @@ class BrokerService:
             return web.json_response({"error": "ComfyUI upstream request failed"}, status=502)
 
     async def stop(self) -> None:
+        if self.media_jobs is not None:
+            self.media_jobs.stop_accepting()
         if self.coordinator is not None:
             await self.coordinator.close()
             self.coordinator = None
+        if self.media_jobs is not None:
+            await self.media_jobs.close()
+            self.media_jobs = None
+        if self.mcp_listener is not None:
+            await self.mcp_listener.close()
+            self.mcp_listener = None
         if self._image_runner is not None:
             await self._image_runner.cleanup()
             self._image_runner = None

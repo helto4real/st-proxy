@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 from st_proxy.cli import build_parser, config_from_args
@@ -9,6 +10,29 @@ from st_proxy.cli import build_parser, config_from_args
 def _parse(*arguments: str):
     with patch.dict(os.environ, {}, clear=True):
         return config_from_args(build_parser().parse_args(arguments))
+
+
+def test_mcp_is_opt_in_and_secrets_are_not_in_config_repr(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert _parse().mcp_port is None
+    assert _parse().mcp_input_dir == "/run/media/veracrypt1/mcp-inputs"
+    assert Path(_parse().mcp_workflows_dir) == Path(__file__).resolve().parents[1] / "workflows"
+    assert _parse("--mcp-port", "8190", "--mcp-output-dir", "/synthetic/results").mcp_token is None
+    with patch.dict(os.environ, {
+        "ST_PROXY_MCP_PORT": "8190", "ST_PROXY_MCP_WORKFLOWS_DIR": "/synthetic/workflows",
+        "ST_PROXY_MCP_OUTPUT_DIR": "/synthetic/results", "ST_PROXY_MCP_TOKEN": "mcp-secret",
+        "ST_PROXY_MCP_INPUT_DIR": "/synthetic/inputs",
+    }, clear=True):
+        config = config_from_args(build_parser().parse_args([]))
+        assert config.mcp_port == 8190
+        assert config.mcp_input_dir == "/synthetic/inputs"
+        assert config.mcp_workflows_dir == "/synthetic/workflows"
+        assert config.mcp_token == "mcp-secret"
+        assert "mcp-secret" not in repr(config)
+        override = config_from_args(build_parser().parse_args([
+            "--mcp-workflows-dir", "/synthetic/override",
+        ]))
+        assert override.mcp_workflows_dir == "/synthetic/override"
 
 
 def test_default_cli_uses_koboldcpp_compatibility_defaults() -> None:
@@ -173,7 +197,8 @@ def test_prism_cli_and_environment_settings() -> None:
 
 
 def test_strata_cli_origins_and_all_mode_overrides() -> None:
-    for kind, port in (("sc117", 48640), ("orca", 48642)):
+    for kind, port in (("sc117", 48640), ("orca", 48642),
+                       ("sc117_128k", 48644), ("orca_128k", 48646)):
         config = _parse("--llm-backend", kind)
         assert config.llm_url == f"http://127.0.0.1:{port}"
     config = _parse("--llm-backend", "all", "--sc117-url", "http://127.0.0.1:6100",
@@ -192,3 +217,14 @@ def test_kobold_default_profile_cli_and_environment() -> None:
     assert _parse("--kobold-default-model", "a.kcpps").kobold_default_model == "a.kcpps"
     with patch.dict(os.environ, {"ST_PROXY_KOBOLD_DEFAULT_MODEL": "b.kcpps"}, clear=True):
         assert config_from_args(build_parser().parse_args(())).kobold_default_model == "b.kcpps"
+
+
+def test_model_profiles_cli_environment_and_disable() -> None:
+    assert _parse().model_profiles is None
+    assert _parse("--model-profiles", "/tmp/profiles.json").model_profiles == "/tmp/profiles.json"
+    with patch.dict(os.environ, {"ST_PROXY_MODEL_PROFILES": "/tmp/env.json"}, clear=True):
+        assert config_from_args(build_parser().parse_args(())).model_profiles == "/tmp/env.json"
+        assert config_from_args(build_parser().parse_args(
+            ("--model-profiles", "/tmp/cli.json"))).model_profiles == "/tmp/cli.json"
+        disabled = config_from_args(build_parser().parse_args(("--model-profiles", "")))
+        assert disabled.model_profiles is None

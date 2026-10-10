@@ -3,11 +3,15 @@ from __future__ import annotations
 import ipaddress
 import os
 from dataclasses import InitVar, dataclass, field, replace
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from .errors import ConfigurationError
 
-CONVENTIONAL_TEST_UNSAFE_PORTS = frozenset({5001, 5002, 5003, 5006, 8188, 8189, 48640, 48642})
+CONVENTIONAL_TEST_UNSAFE_PORTS = frozenset({
+    5001, 5002, 5003, 5006, 8188, 8189, 48640, 48642, 48644, 48646,
+})
+DEFAULT_MCP_WORKFLOWS_DIR = str(Path(__file__).resolve().parents[2] / "workflows")
 
 
 def normalize_origin(value: str) -> str:
@@ -64,12 +68,20 @@ class BrokerConfig:
     listen_host: str = "127.0.0.1"
     chat_port: int = 5001
     image_port: int = 8188
+    mcp_port: int | None = None
+    mcp_workflows_dir: str = DEFAULT_MCP_WORKFLOWS_DIR
+    mcp_output_dir: str | None = None
+    mcp_input_dir: str = "/run/media/veracrypt1/mcp-inputs"
+    mcp_token: str | None = field(default=None, repr=False)
+    model_profiles: str | None = None
     llm_backend: str = "koboldcpp"
     llm_url: str = ""
     tabby_url: str = "http://127.0.0.1:5003"
     prism_url: str = "http://127.0.0.1:5006"
     sc117_url: str = "http://127.0.0.1:48640"
     orca_url: str = "http://127.0.0.1:48642"
+    sc117_128k_url: str = "http://127.0.0.1:48644"
+    orca_128k_url: str = "http://127.0.0.1:48646"
     kobold_url: InitVar[str | None] = None
     comfy_url: str = "http://127.0.0.1:8189"
     kobold_admin_password: str | None = None
@@ -99,6 +111,13 @@ class BrokerConfig:
     test_registry: TestEndpointRegistry | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self, kobold_url: str | None) -> None:
+        if self.mcp_port is not None:
+            if not 0 <= self.mcp_port <= 65535:
+                raise ConfigurationError("mcp_port must be between 0 and 65535")
+            if not self.mcp_workflows_dir or not self.mcp_output_dir:
+                raise ConfigurationError("MCP requires workflow/output directories")
+            if self.test_mode and self.mcp_port != 0:
+                raise ConfigurationError("test mode requires a dynamically allocated MCP port")
         if not self.kobold_default_model.strip():
             raise ConfigurationError("kobold_default_model cannot be empty")
         if not self.prism_model.strip():
@@ -114,11 +133,13 @@ class BrokerConfig:
                 raise ConfigurationError("llm_url and kobold_url cannot disagree")
         llm_url = kobold_url or self.llm_url or backend_default_origin(self.llm_backend)
         object.__setattr__(self, "llm_url", normalize_origin(llm_url))
-        for name in ("tabby_url", "prism_url", "sc117_url", "orca_url"):
+        for name in ("tabby_url", "prism_url", "sc117_url", "orca_url",
+                     "sc117_128k_url", "orca_128k_url"):
             object.__setattr__(self, name, normalize_origin(getattr(self, name)))
         if self.llm_backend == "all" and len({
             self.llm_url, self.tabby_url, self.prism_url, self.sc117_url, self.orca_url,
-        }) != 5:
+            self.sc117_128k_url, self.orca_128k_url,
+        }) != 7:
             raise ConfigurationError("all backends require distinct upstream origins")
         object.__setattr__(self, "comfy_url", normalize_origin(self.comfy_url))
         if not 0 <= self.chat_port <= 65535 or not 0 <= self.image_port <= 65535:
@@ -160,7 +181,8 @@ class BrokerConfig:
                 raise ConfigurationError("test mode requires a process-local endpoint registry")
             origins = [self.llm_url, self.comfy_url]
             if self.llm_backend == "all":
-                origins.extend((self.tabby_url, self.prism_url, self.sc117_url, self.orca_url))
+                origins.extend((self.tabby_url, self.prism_url, self.sc117_url, self.orca_url,
+                                self.sc117_128k_url, self.orca_128k_url))
             for origin in origins:
                 if not self.test_registry.contains(origin):
                     raise ConfigurationError("test mode rejected an unregistered upstream endpoint")
@@ -178,6 +200,8 @@ class BrokerConfig:
         prism_url: str = "http://127.0.0.1:5006",
         sc117_url: str = "http://127.0.0.1:48640",
         orca_url: str = "http://127.0.0.1:48642",
+        sc117_128k_url: str = "http://127.0.0.1:48644",
+        orca_128k_url: str = "http://127.0.0.1:48646",
         **overrides: object,
     ) -> BrokerConfig:
         selected_llm_url = llm_url or kobold_url
@@ -192,6 +216,8 @@ class BrokerConfig:
             prism_url=prism_url,
             sc117_url=sc117_url,
             orca_url=orca_url,
+            sc117_128k_url=sc117_128k_url,
+            orca_128k_url=orca_128k_url,
             comfy_url=comfy_url,
             test_mode=True,
             test_registry=registry,

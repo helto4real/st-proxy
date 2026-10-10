@@ -1,0 +1,76 @@
+{
+  "id": "qwen_scene",
+  "name": "Qwen reference scene",
+  "description": "Compose a scene from text and up to ten ordered reference images. Read prompt_guidance before writing the scene prompt.",
+  "workflow": "qwen_scene.json",
+  "parameters": {
+    "prompt": {
+      "type": "string",
+      "description": "Describe the image to generate.",
+      "required": true,
+      "minLength": 1,
+      "maxLength": 12000,
+      "private": true,
+      "target": {
+        "node": "1",
+        "input": "positive_prompt"
+      }
+    },
+    "aspect_ratio": {
+      "type": "string",
+      "description": "Image width-to-height ratio.",
+      "default": "16:9",
+      "enum": [
+        "1:1",
+        "2:3",
+        "3:2",
+        "3:4",
+        "4:3",
+        "4:5",
+        "5:4",
+        "9:16",
+        "16:9"
+      ],
+      "target": {
+        "node": "1",
+        "input": "aspect ratio"
+      }
+    },
+    "max_side": {
+      "type": "integer",
+      "description": "Longest image edge in pixels; must be a multiple of 32.",
+      "default": 1600,
+      "minimum": 256,
+      "maximum": 3200,
+      "multipleOf": 32,
+      "target": {
+        "node": "1",
+        "input": "max side"
+      }
+    }
+  },
+  "outputs": [
+    {
+      "node": "3",
+      "adapter": "helto_saved_images"
+    }
+  ],
+  "prompt_guidance": "prompts/reference-aware-scene.md",
+  "references": {
+    "adapter": "helto_root_images",
+    "generator": "1",
+    "loader": "9",
+    "inputs": [
+      "image 1",
+      "image 2",
+      "image 3",
+      "image 4",
+      "image 5",
+      "image 6",
+      "image 7",
+      "image 8",
+      "image 9",
+      "image 10"
+    ]
+  }
+}

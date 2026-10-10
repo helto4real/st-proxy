@@ -49,6 +49,18 @@ class SubmissionOutcome:
 
 
 @dataclass(slots=True)
+class ImageOutcome:
+    outputs: dict[str, Any] | None = None
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class ImageTicket:
+    submitted: asyncio.Future[SubmissionOutcome]
+    completion: asyncio.Future[ImageOutcome]
+
+
+@dataclass(slots=True)
 class ChatWork:
     sequence: int
     ready: asyncio.Future[str | None]
@@ -65,6 +77,7 @@ class ImageWork:
     headers: dict[str, str]
     body: bytes
     submitted: asyncio.Future[SubmissionOutcome]
+    completion: asyncio.Future[ImageOutcome] | None = None
     cancelled: bool = False
 
 
@@ -315,6 +328,7 @@ class HandoffCoordinator:
         query_string: str,
         headers: dict[str, str],
         body: bytes,
+        completion: asyncio.Future[ImageOutcome] | None = None,
     ) -> BufferedResponse:
         loop = asyncio.get_running_loop()
         async with self._condition:
@@ -322,18 +336,7 @@ class HandoffCoordinator:
                 raise HandoffError("broker is shutting down")
             if self._fatal_error:
                 raise HandoffError(self._fatal_error)
-            body_size = len(body)
-            if body_size > self._config.max_workflow_body_bytes:
-                raise HandoffError(
-                    "workflow request body exceeds the configured size limit"
-                )
-            if self._waiting_images >= self._config.max_queued_images:
-                raise QueueFull("workflow queue has reached its request limit")
-            if (
-                self._queued_workflow_bytes + body_size
-                > self._config.max_queued_workflow_bytes
-            ):
-                raise QueueFull("workflow queue has reached its memory limit")
+            self._check_image_capacity([body])
             work = ImageWork(
                 self._next_sequence(),
                 path,
@@ -341,6 +344,7 @@ class HandoffCoordinator:
                 headers,
                 body,
                 loop.create_future(),
+                completion,
             )
             self._append_queued(work)
             LOG.info(
@@ -360,6 +364,7 @@ class HandoffCoordinator:
                     work.cancelled = True
                     removed = self._remove_queued(work)
                     if removed:
+                        self._resolve_image_error(work, "image request was cancelled")
                         LOG.info(
                             "cancelled image request removed before submission: sequence=%s",
                             work.sequence,
@@ -368,6 +373,48 @@ class HandoffCoordinator:
         if outcome.response is None:
             raise HandoffError(outcome.error or "image handoff failed before submission")
         return outcome.response
+
+    def _check_image_capacity(self, bodies: list[bytes]) -> None:
+        if any(len(body) > self._config.max_workflow_body_bytes for body in bodies):
+            raise HandoffError("workflow request body exceeds the configured size limit")
+        if self._waiting_images + len(bodies) > self._config.max_queued_images:
+            raise QueueFull("workflow queue has reached its request limit")
+        if (self._queued_workflow_bytes + sum(map(len, bodies))
+                > self._config.max_queued_workflow_bytes):
+            raise QueueFull("workflow queue has reached its memory limit")
+
+    @contextlib.asynccontextmanager
+    async def image_batch(self, bodies: list[bytes]) -> AsyncIterator[list[ImageTicket]]:
+        """Reserve consecutive FIFO positions, all or none, using normal image dispatch."""
+        if not bodies:
+            raise HandoffError("image batch must not be empty")
+        loop = asyncio.get_running_loop()
+        async with self._condition:
+            if self._closing:
+                raise HandoffError("broker is shutting down")
+            if self._fatal_error:
+                raise HandoffError(self._fatal_error)
+            self._check_image_capacity(bodies)
+            tickets = [ImageTicket(loop.create_future(), loop.create_future()) for _ in bodies]
+            works = [ImageWork(self._next_sequence(), "/prompt", "",
+                               {"Content-Type": "application/json"}, body,
+                               ticket.submitted, ticket.completion)
+                     for body, ticket in zip(bodies, tickets, strict=True)]
+            for work in works:
+                self._append_queued(work)
+            LOG.info("image batch queued: count=%s waiting_images=%s",
+                     len(works), self._waiting_images)
+            self._condition.notify_all()
+        try:
+            yield tickets
+        finally:
+            async with self._condition:
+                for work in works:
+                    if work.completion is not None and not work.completion.done():
+                        work.cancelled = True
+                        if self._remove_queued(work):
+                            self._resolve_image_error(work, "image batch wait was cancelled")
+                self._condition.notify_all()
 
     @contextlib.asynccontextmanager
     async def comfy_control_lease(self) -> AsyncIterator[None]:
@@ -554,7 +601,9 @@ class HandoffCoordinator:
             self._active_prompt_id = result.prompt_id
             self._active_prompt_terminal = asyncio.Event()
             LOG.info("ComfyUI image job started: prompt_id=%s", result.prompt_id)
-            await self._comfy.wait_for_prompt(result.prompt_id)
+            outputs = await self._comfy.wait_for_prompt(result.prompt_id)
+            if work.completion is not None and not work.completion.done():
+                work.completion.set_result(ImageOutcome(outputs=outputs))
             LOG.info("ComfyUI image job completed: prompt_id=%s", result.prompt_id)
             self._set_state(HandoffState.COMFY_READY)
         except asyncio.CancelledError:
@@ -767,6 +816,8 @@ class HandoffCoordinator:
     def _resolve_image_error(self, work: ImageWork, error: str) -> None:
         if not work.submitted.done():
             work.submitted.set_result(SubmissionOutcome(error=error))
+        if work.completion is not None and not work.completion.done():
+            work.completion.set_result(ImageOutcome(error=error))
 
     async def _mark_fatal(self, error: str) -> None:
         async with self._condition:

@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 from aiohttp import ClientSession, web
 
@@ -46,6 +48,8 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.prism = MockPrism()
         self.sc117 = MockStrata("synthetic-sc117")
         self.orca = MockStrata("synthetic-orca")
+        self.sc117_128k = MockStrata("synthetic-sc117")
+        self.orca_128k = MockStrata("synthetic-orca")
         self.comfy = CleanupComfy()
         self.servers = []
         self.events = []
@@ -53,7 +57,8 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         origins = {}
         for engine, mock in (("koboldcpp", self.kobold), ("tabbyapi", self.tabby),
                              ("prism", self.prism), ("sc117", self.sc117),
-                             ("orca", self.orca), ("comfy", self.comfy)):
+                             ("orca", self.orca), ("sc117_128k", self.sc117_128k),
+                             ("orca_128k", self.orca_128k), ("comfy", self.comfy)):
             app = mock.app()
             app.middlewares.append(self.guard(engine))
             server = DynamicServer(app)
@@ -63,6 +68,7 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
             llm_backend="all", llm_url=origins["koboldcpp"], tabby_url=origins["tabbyapi"],
             prism_url=origins["prism"], comfy_url=origins["comfy"], registry=registry,
             prism_model=self.prism.model, sc117_url=origins["sc117"], orca_url=origins["orca"],
+            sc117_128k_url=origins["sc117_128k"], orca_128k_url=origins["orca_128k"],
         )
         self.service = BrokerService(self.config)
         await self.service.start()
@@ -71,7 +77,9 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.image_url = f"http://127.0.0.1:{self.service.image_port}"
         self.models = {"koboldcpp": "koboldcpp/a.kcpps", "tabbyapi": "tabbyapi/synthetic-exl3",
                        "prism": f"prism/{self.prism.model}",
-                       "sc117": f"sc117/{self.sc117.model}", "orca": f"orca/{self.orca.model}"}
+                       "sc117": f"sc117/{self.sc117.model}", "orca": f"orca/{self.orca.model}",
+                       "sc117_128k": f"sc117_128k/{self.sc117_128k.model}",
+                       "orca_128k": f"orca_128k/{self.orca_128k.model}"}
 
     def guard(self, engine):
         @web.middleware
@@ -89,19 +97,26 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(self.sc117.loaded)
                 if engine != "orca":
                     self.assertFalse(self.orca.loaded)
+                if engine != "sc117_128k":
+                    self.assertFalse(self.sc117_128k.loaded)
+                if engine != "orca_128k":
+                    self.assertFalse(self.orca_128k.loaded)
                 if engine != "comfy":
                     self.assertTrue(all(event.is_set() for event in self.comfy.completion.values()))
             return await handler(request)
         return middleware
 
     async def asyncTearDown(self):
-        for mock in (self.kobold, self.tabby, self.prism, self.sc117, self.orca):
+        for mock in (self.kobold, self.tabby, self.prism, self.sc117, self.orca,
+                     self.sc117_128k, self.orca_128k):
             mock.chat_release.set()
         self.kobold.load_gate.set()
         self.tabby.load_release.set()
         self.prism.confirm.set()
         self.sc117.confirm.set()
         self.orca.confirm.set()
+        self.sc117_128k.confirm.set()
+        self.orca_128k.confirm.set()
         for event in self.comfy.completion.values():
             event.set()
         await self.service.stop()
@@ -120,6 +135,43 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
             await response.read()
             return response.status
 
+    async def enable_profiles(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "profiles.json"
+        path.write_text(json.dumps({"version": 1, "profiles": [
+            {"id": engine, "models": [model],
+             "defaults": {"top_k": 20, "temperature": 0.7, "repetition_penalty": 1}}
+            for engine, model in self.models.items() if engine != "koboldcpp"
+        ]}))
+        await self.service.stop()
+        self.service = BrokerService(replace(self.config, model_profiles=str(path)))
+        await self.service.start()
+        self.url = f"http://127.0.0.1:{self.service.chat_port}"
+        self.image_url = f"http://127.0.0.1:{self.service.image_port}"
+
+    async def test_profiles_follow_resolved_models_and_do_not_leak_between_requests(self):
+        await self.enable_profiles()
+        self.assertEqual(self.events, [])
+        for engine in ("prism", "tabbyapi", "sc117", "orca", "sc117_128k", "orca_128k"):
+            for overrides in ({"temperature": 0, "repeat_penalty": 1.2}, {}):
+                status, _ = await self.chat(self.models[engine], **overrides)
+                self.assertEqual(status, 200)
+                mock = self.tabby if engine == "tabbyapi" else getattr(self, engine)
+                sent = (json.loads(mock.chat_payloads[-1]) if engine == "prism" else
+                        json.loads(mock.payloads[-1]) if engine == "tabbyapi"
+                        else mock.payloads[-1])
+                self.assertEqual(sent["model"], self.models[engine].split("/", 1)[1])
+                self.assertEqual(sent["temperature"], overrides.get("temperature", 0.7))
+                self.assertEqual(sent["top_k"], 20)
+                wire = "repeat_penalty" if engine == "prism" else "repetition_penalty"
+                self.assertEqual(sent[wire], overrides.get("repeat_penalty", 1))
+                self.assertNotIn("reasoning_budget_tokens", sent)
+        self.assertEqual((await self.chat(f"prism/{self.prism.other}"))[0], 200)
+        sent = json.loads(self.prism.chat_payloads[-1])
+        self.assertNotIn("temperature", sent)
+        self.assertNotIn("top_k", sent)
+
     async def test_catalog_and_check_are_passive_and_preserve_native_ids(self):
         self.assertEqual(self.events, [])
         await check_backend(self.config, 1)
@@ -129,7 +181,8 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         expected = {"koboldcpp/initial_model", "koboldcpp/a.kcpps", "koboldcpp/b.kcpps",
                     "tabbyapi/synthetic-exl3", "tabbyapi/another-exl3",
                     f"prism/{self.prism.model}", f"prism/{self.prism.other}",
-                    f"sc117/{self.sc117.model}", f"orca/{self.orca.model}"}
+                    f"sc117/{self.sc117.model}", f"orca/{self.orca.model}",
+                    f"sc117_128k/{self.sc117_128k.model}", f"orca_128k/{self.orca_128k.model}"}
         self.assertEqual({card["id"] for card in cards}, expected)
         self.assertFalse(any(method == "POST" for _, method, _ in self.events))
         self.assertEqual(self.service.coordinator.status()["state"], "awaiting_request")
@@ -139,7 +192,7 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("tabbyapi/new/native-model",
                           {card["id"] for card in (await response.json())["data"]})
 
-    async def test_all_twenty_cross_engine_directions_and_native_model_translation(self):
+    async def test_all_cross_engine_directions_and_native_model_translation(self):
         for source, destination in itertools.permutations(self.models, 2):
             with self.subTest(source=source, destination=destination):
                 self.assertEqual((await self.chat(self.models[source]))[0], 200)
@@ -170,6 +223,7 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await self.chat(self.models[next_engine]))[0], 200)
 
     async def test_stream_blocks_switch_and_preserves_fifo_with_image(self):
+        await self.enable_profiles()
         self.tabby.hold_chat = True
         response = await self.client.post(self.url + "/v1/chat/completions", json={
             "model": self.models["tabbyapi"], "stream": True,
@@ -190,6 +244,9 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await image, 200)
         self.assertEqual(self.prism.operations, [("load", self.prism.model),
                                                 ("unload", self.prism.model)])
+        for body in (self.tabby.payloads[-1], self.prism.chat_payloads[-1]):
+            self.assertEqual(json.loads(body)["temperature"], 0.7)
+            self.assertNotIn("reasoning_budget_tokens", json.loads(body))
 
     async def test_failed_unload_blocks_next_engine_and_image(self):
         self.assertEqual((await self.chat(self.models["prism"]))[0], 200)
@@ -219,6 +276,8 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.prism.confirm.set()
         self.sc117.confirm.set()
         self.orca.confirm.set()
+        self.sc117_128k.confirm.set()
+        self.orca_128k.confirm.set()
         self.assertEqual((await task)[0], 200)
 
     async def test_tabby_failed_switch_can_retry_the_requested_model(self):
@@ -268,7 +327,8 @@ class MultiBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(method == "POST" for _, method, _ in self.events))
 
     async def test_test_mode_rejects_any_unregistered_engine(self):
-        for field in ("llm_url", "tabby_url", "prism_url", "sc117_url", "orca_url"):
+        for field in ("llm_url", "tabby_url", "prism_url", "sc117_url", "orca_url",
+                      "sc117_128k_url", "orca_128k_url"):
             with self.subTest(field=field), self.assertRaises(ConfigurationError):
                 replace(self.config, **{field: "http://127.0.0.1:65500"})
 

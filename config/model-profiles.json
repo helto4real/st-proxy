@@ -1,0 +1,192 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "qwen-flash-next-sc117",
+      "models": [
+        "sc117/sc117-qwen3.8-flash-next-gsq-rco-abliterated-iq3_xxs",
+        "sc117_128k/sc117-qwen3.8-flash-next-gsq-rco-abliterated-iq3_xxs"
+      ],
+      "defaults": {
+        "top_k": 20,
+        "repetition_penalty": 1.0,
+        "frequency_penalty": 0.0,
+        "min_p": 0.0
+      },
+      "thinking": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "min_p": 0.0,
+        "presence_penalty": 0.0
+      },
+      "non_thinking": {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "min_p": 0.0,
+        "presence_penalty": 1.5
+      },
+      "sources": [
+        "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
+        "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/generation_config.json",
+        "https://huggingface.co/SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF"
+      ],
+      "checked_at": "2026-10-10",
+      "notes": "Qwen recommendations inherited by this derivative; no separate sampling recommendation found. Coding/agent starting point, not a locally benchmarked optimum. Frequency penalty 0 is a neutral project default. Mode-specific defaults require an explicit, unambiguous thinking control. No reasoning level, budget or output limit is set."
+    },
+    {
+      "id": "qwen-flash-next-orca",
+      "models": [
+        "orca/orcarouter-qwen3.8-flash-next-uncensored-iq3_xxs",
+        "orca_128k/orcarouter-qwen3.8-flash-next-uncensored-iq3_xxs"
+      ],
+      "defaults": {
+        "top_k": 20,
+        "repetition_penalty": 1.0,
+        "frequency_penalty": 0.0,
+        "min_p": 0.0
+      },
+      "thinking": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "min_p": 0.0,
+        "presence_penalty": 0.0
+      },
+      "non_thinking": {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "min_p": 0.0,
+        "presence_penalty": 1.5
+      },
+      "sources": [
+        "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
+        "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/generation_config.json",
+        "https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored"
+      ],
+      "checked_at": "2026-10-10",
+      "notes": "Qwen recommendations inherited by this derivative; no separate sampling recommendation found. Coding/agent starting point, not a locally benchmarked optimum. Frequency penalty 0 is a neutral project default. Mode-specific defaults require an explicit, unambiguous thinking control. No reasoning level, budget or output limit is set."
+    },
+    {
+      "id": "bonsai-2-original",
+      "models": [
+        "prism/prism-bonsai-2-27b"
+      ],
+      "defaults": {
+        "top_k": 20,
+        "repetition_penalty": 1.0,
+        "frequency_penalty": 0.0
+      },
+      "thinking": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "min_p": 0.05,
+        "presence_penalty": 0.0
+      },
+      "non_thinking": {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "min_p": 0.0,
+        "presence_penalty": 1.5
+      },
+      "sources": [
+        "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf",
+        "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/blob/6ed5e12bf84b7a63069882c91dd9e9218647d17b/README.md"
+      ],
+      "checked_at": "2026-10-10",
+      "notes": "PrismML thinking/non-thinking recommendations, including min_p 0.05 for thinking. Frequency penalty 0 is a neutral project default. Mode-specific defaults require an explicit, unambiguous thinking control. No reasoning level, budget or output limit is set.",
+      "installed_revision": "6ed5e12bf84b7a63069882c91dd9e9218647d17b"
+    },
+    {
+      "id": "bonsai-2-abliterated",
+      "models": [
+        "prism/prism-bonsai-2-27b-abliterated"
+      ],
+      "defaults": {
+        "top_k": 20,
+        "repetition_penalty": 1.0,
+        "frequency_penalty": 0.0
+      },
+      "thinking": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "min_p": 0.05,
+        "presence_penalty": 0.0
+      },
+      "non_thinking": {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "min_p": 0.0,
+        "presence_penalty": 1.5
+      },
+      "sources": [
+        "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf",
+        "https://huggingface.co/BoldingBuilds/Ternary-Bonsai-2-27B-Abliterated-PTQ1_0-GGUF",
+        "https://huggingface.co/BoldingBuilds/Ternary-Bonsai-2-27B-Abliterated-PTQ1_0-GGUF/blob/95ff0409db450bcd705d1d0c6d8aaeffd58de6cd/README.md"
+      ],
+      "checked_at": "2026-10-10",
+      "notes": "Inherited Bonsai defaults. The publisher warns about runaway thinking in this older build and recommends thinking off; this profile does not change the caller's thinking choice. Frequency penalty 0 is a neutral project default. Mode-specific defaults require an explicit, unambiguous thinking control. No reasoning level, budget or output limit is set.",
+      "installed_revision": "95ff0409db450bcd705d1d0c6d8aaeffd58de6cd"
+    },
+    {
+      "id": "bonsai-2-abliterated-v2",
+      "models": [
+        "prism/prism-bonsai-2-27b-abliterated-v2-mtp"
+      ],
+      "defaults": {
+        "top_k": 20,
+        "repetition_penalty": 1.0,
+        "frequency_penalty": 0.0
+      },
+      "thinking": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "min_p": 0.05,
+        "presence_penalty": 0.0
+      },
+      "non_thinking": {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "min_p": 0.0,
+        "presence_penalty": 1.5
+      },
+      "sources": [
+        "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf",
+        "https://huggingface.co/BoldingBuilds/Ternary-Bonsai-2-27B-Abliterated-v2-PQ2_0-MTP-GGUF",
+        "https://huggingface.co/BoldingBuilds/Ternary-Bonsai-2-27B-Abliterated-v2-PQ2_0-MTP-GGUF/blob/e25d197aa62ce0a2f685fc65d76a41b2416c5e66/README.md"
+      ],
+      "checked_at": "2026-10-10",
+      "notes": "Publisher recommends temperature 1, top_k 20, top_p 0.95. Other sampling values inherit Bonsai recommendations as a project choice. Publisher recommends medium for tight output budgets; no level is forced. Frequency penalty 0 is a neutral project default. Mode-specific defaults require an explicit, unambiguous thinking control. No reasoning level, budget or output limit is set.",
+      "installed_revision": "e25d197aa62ce0a2f685fc65d76a41b2416c5e66"
+    },
+    {
+      "id": "bonsai-2-twinturbo",
+      "models": [
+        "prism/prism-bonsai-2-27b-twinturbo-residual"
+      ],
+      "defaults": {
+        "top_k": 20,
+        "repetition_penalty": 1.0,
+        "frequency_penalty": 0.0
+      },
+      "thinking": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "min_p": 0.05,
+        "presence_penalty": 0.0
+      },
+      "non_thinking": {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "min_p": 0.0,
+        "presence_penalty": 1.5
+      },
+      "sources": [
+        "https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf",
+        "https://huggingface.co/shunmoridev/Qwen3.8-27B-TwinTurbo-Residual-Bonsai-2-PQ2_0-GGUF",
+        "https://huggingface.co/shunmoridev/Qwen3.8-27B-TwinTurbo-Residual-Bonsai-2-PQ2_0-GGUF/blob/19c22d6733f7dbed6c818173ce9bdef22ac6cab3/README.md"
+      ],
+      "checked_at": "2026-10-10",
+      "notes": "Publisher usage specifies temperature 1, top_k 20, top_p 0.95 and medium reasoning. Other sampling values inherit Bonsai recommendations as a project choice. No level is forced. Frequency penalty 0 is a neutral project default. Mode-specific defaults require an explicit, unambiguous thinking control. No reasoning level, budget or output limit is set.",
+      "installed_revision": "19c22d6733f7dbed6c818173ce9bdef22ac6cab3"
+    }
+  ]
+}

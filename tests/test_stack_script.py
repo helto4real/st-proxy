@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import pty
+import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -52,6 +55,10 @@ class FakeStack:
         shutil.copy2(REPO_ROOT / "scripts/kobold_bootstrap.py", self.repo / "scripts")
         (self.repo / ".venv/bin/python").symlink_to(sys.executable)
         self.env = os.environ.copy()
+        for key in ("ST_PROXY_MCP_PORT", "ST_PROXY_MCP_WORKFLOWS_DIR",
+                    "ST_PROXY_MCP_OUTPUT_DIR", "ST_PROXY_MCP_INPUT_DIR", "ST_PROXY_MCP_TOKEN",
+                    "ST_PROXY_MODEL_PROFILES"):
+            self.env.pop(key, None)
         self.env.update(
             {
                 "HOME": str(self.home),
@@ -96,6 +103,11 @@ while :; do sleep 1; done
             _write_executable(qwen / script,
                               f'#!/bin/sh\ncd "{launcher.parent}"\nexec "{launcher}" "$@"\n')
 
+        for kind in ("sc117", "orca"):
+            profile = self.home / "git/local-model-runtimes/models/qwen-next" / f"{kind}-128k"
+            _write_executable(profile / "launch.py", shell_service("llm"))
+            _write_executable(profile / "start.sh", '#!/bin/sh\nexec ./launch.py "$@"\n')
+
         _write_executable(self.silly_dir / "start.sh", shell_service("silly"))
 
         _write_executable(self.bin_dir / "uv", shell_service("pockettts"))
@@ -137,6 +149,8 @@ if [ "$check_backend" -eq 1 ]; then
         *:5006) suffix=/prism ;;
         *:48640) suffix=/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS ;;
         *:48642) suffix=/Qwen3.8-Flash-Next-Uncensored-IQ3_XXS ;;
+        *:48644) suffix=/sc117-128k ;;
+        *:48646) suffix=/orca-128k ;;
     esac
     pid=$(awk -F '|' -v suffix="$suffix" \\
         '$1 == "llm" && (suffix == "" || index($2, suffix)) { pid = $3 } \\
@@ -288,6 +302,7 @@ def test_start_order_working_directories_and_logging(
 
     proxy_pid = next(pid for service, _cwd, pid in events if service == "proxy")
     proxy_command = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    proxy_environment = Path(f"/proc/{proxy_pid}/environ").read_bytes().split(b"\0")
     readiness_requests = fake_stack.curl_log.read_text(encoding="utf-8").splitlines()
 
     process.send_signal(signal.SIGINT)
@@ -306,6 +321,12 @@ def test_start_order_working_directories_and_logging(
     assert "--comfy-url http://127.0.0.1:8188" in proxy_command
     assert "--chat-port 5002" in proxy_command
     assert "--image-port 8189" in proxy_command
+    assert "--mcp-port 8190" in proxy_command
+    assert f"--mcp-workflows-dir {fake_stack.repo / 'workflows'}" in proxy_command
+    assert "--mcp-output-dir /run/media/veracrypt1/mcp-images" in proxy_command
+    assert "--mcp-input-dir /run/media/veracrypt1/mcp-inputs" in proxy_command
+    assert f"--model-profiles {fake_stack.repo / 'config/model-profiles.json'}" in proxy_command
+    assert not any(value.startswith(b"ST_PROXY_MCP_TOKEN=") for value in proxy_environment)
     assert "--idle-timeout 60" in proxy_command
     assert "--restore-llm-on-idle" not in proxy_command
 
@@ -320,6 +341,127 @@ def test_start_order_working_directories_and_logging(
     assert "ERROR st_proxy: synthetic backend failure" in output
     assert ("llm-child-log" in output) is show_logs
     assert "pockettts-child-log" not in output
+
+
+def test_mcp_environment_overrides_reach_proxy(fake_stack: FakeStack) -> None:
+    workflow_dir = str(fake_stack.root / "workflow alternatives")
+    output_dir = str(fake_stack.root / "image copies")
+    fake_stack.env.update({
+        "ST_PROXY_MCP_PORT": "8191", "ST_PROXY_MCP_WORKFLOWS_DIR": workflow_dir,
+        "ST_PROXY_MCP_OUTPUT_DIR": output_dir, "ST_PROXY_MCP_TOKEN": "synthetic-mcp-token",
+        "ST_PROXY_MCP_INPUT_DIR": "/synthetic/input images",
+    })
+    process = fake_stack.start()
+    try:
+        events = fake_stack.wait_for_services(process, {"llm", "proxy"})
+        proxy_pid = next(pid for service, _, pid in events if service == "proxy")
+        arguments = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().split(b"\0")
+        environment = Path(f"/proc/{proxy_pid}/environ").read_bytes().split(b"\0")
+        for flag, value in (("--mcp-port", "8191"), ("--mcp-workflows-dir", workflow_dir),
+                            ("--mcp-output-dir", output_dir),
+                            ("--mcp-input-dir", "/synthetic/input images")):
+            assert arguments[arguments.index(flag.encode()) + 1].decode() == value
+        assert b"ST_PROXY_MCP_TOKEN=synthetic-mcp-token" in environment
+        assert b"synthetic-mcp-token" not in arguments
+    finally:
+        process.send_signal(signal.SIGINT)
+        output = process.communicate(timeout=12)[0]
+    assert process.returncode == 130
+    assert "synthetic-mcp-token" not in output
+
+
+@pytest.mark.parametrize("profile_path", ["/synthetic/model profiles.json", ""])
+def test_model_profiles_override_and_disable_reach_proxy(fake_stack, profile_path):
+    fake_stack.env["ST_PROXY_MODEL_PROFILES"] = profile_path
+    process = fake_stack.start()
+    try:
+        events = fake_stack.wait_for_services(process, {"llm", "proxy"})
+        proxy_pid = next(pid for service, _, pid in events if service == "proxy")
+        arguments = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().split(b"\0")
+        assert arguments[arguments.index(b"--model-profiles") + 1].decode() == profile_path
+    finally:
+        process.send_signal(signal.SIGINT)
+        process.communicate(timeout=12)
+    assert process.returncode == 130
+
+
+@pytest.mark.parametrize(("backend", "terminal_fd", "no_color", "show_logs"), [
+    ("sc117", 0, False, True),
+    ("sc117", 1, False, True),
+    ("orca", 2, False, True),
+    ("sc117", 1, True, True),
+    ("orca", 2, False, False),
+])
+def test_strata_terminal_colors_and_process_group_cleanup(
+    fake_stack, backend, terminal_fd, no_color, show_logs,
+):
+    for key in ("ST_STACK_LLM_COMMAND", "ST_STACK_LLM_DIR", "ST_PROXY_LLM_URL", "NO_COLOR"):
+        fake_stack.env.pop(key, None)
+    fake_stack.env.update(
+        ST_PROXY_LLM_BACKEND=backend, TERM="xterm-256color",
+        PYTHONPATH=str(REPO_ROOT / "src"),
+    )
+    if no_color:
+        fake_stack.env["NO_COLOR"] = "1"
+    # Preserve the real test interpreter's venv for the streaming module's imports.
+    python = fake_stack.repo / ".venv/bin/python"
+    python.unlink()
+    _write_executable(python, f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    model = ("Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS" if backend == "sc117"
+             else "Qwen3.8-Flash-Next-Uncensored-IQ3_XXS")
+    launcher = fake_stack.home / "git/qwen-next-server" / model / "launch.py"
+    launcher.write_text(launcher.read_text().replace(
+        "trap 'exit 0'", "printf '[strata] answering: 9 tokens, 43.4 tok/s\\n'\n"
+        "printf '[strata] still starting (34 s) - please wait ...\\n' >&2\ntrap 'exit 0'",
+    ))
+    master, slave = pty.openpty()
+    supervisor = subprocess.Popen(
+        ["zsh", str(fake_stack.script), *(("--log",) if show_logs else ())],
+        cwd=fake_stack.outside, env=fake_stack.env,
+        stdout=slave if terminal_fd in (0, 1) else subprocess.PIPE,
+        stderr=slave if terminal_fd in (0, 2) else subprocess.PIPE,
+    )
+    os.close(slave)
+    try:
+        events = fake_stack.wait_for_services(supervisor, {"llm", "proxy"})
+        llm_pid = next(pid for service, _, pid in events if service == "llm")
+        expected_color = show_logs and not no_color
+
+        output = b""
+        stream_count = 2 if terminal_fd == 0 else 1
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                output += os.read(master, 65536)
+            if output.count(b"[strata]") >= stream_count or not show_logs:
+                break
+        assert (b"\x1b[38;2;203;166;247m[strata]" in output) is expected_color
+        assert (b"[strata]" in output) is show_logs
+
+        # zsh may reparent process substitutions; inspect only this synthetic session.
+        members = subprocess.check_output(["ps", "-s", str(llm_pid), "-o", "pid="]).split()
+        filters = [int(pid) for pid in members if b"st_proxy.strata_logging" in
+                   Path(f"/proc/{int(pid)}/cmdline").read_bytes()]
+        assert len(filters) == stream_count * int(expected_color)
+        assert all(os.getpgid(pid) == llm_pid for pid in filters)
+
+        supervisor.send_signal(signal.SIGINT)
+        stdout, stderr = supervisor.communicate(timeout=12)
+        assert supervisor.returncode == 130
+        if terminal_fd:
+            redirected = stderr if terminal_fd == 1 else stdout
+            assert b"\x1b[" not in redirected
+            assert (b"[strata]" in redirected) is show_logs
+        for pid in filters:
+            stat = Path(f"/proc/{pid}/stat")
+            assert not stat.exists() or stat.read_text().split()[2] == "Z"
+        runtime = fake_stack.runtime / f"st-stack-{os.getuid()}"
+        assert not list(runtime.glob("*.pgid"))
+    finally:
+        if supervisor.poll() is None:
+            supervisor.send_signal(signal.SIGTERM)
+            supervisor.communicate(timeout=12)
+        os.close(master)
 
 
 def test_koboldcpp_config_setting_accepts_relative_name_without_extension(
@@ -746,9 +888,12 @@ def test_proxy_does_not_require_alltalk_ready_response(fake_stack: FakeStack) ->
 
 @pytest.mark.parametrize("backend, directory, port, choice, label", [
     ("tabbyapi", "tabby", 5003, "2", "TabbyAPI"),
-    ("prism", "prism", 5006, "3", "Prism"),
+    ("prism", "local-model-runtimes/models/prism", 5006, "3", "Prism"),
     ("sc117", "qwen-next-server", 48640, "4", "Qwen SC117"),
     ("orca", "qwen-next-server", 48642, "5", "Qwen Orca"),
+    ("sc117_128k", "local-model-runtimes/models/qwen-next/sc117-128k",
+     48644, "6", "Qwen SC117 128k"),
+    ("orca_128k", "local-model-runtimes/models/qwen-next/orca-128k", 48646, "7", "Qwen Orca 128k"),
 ])
 @pytest.mark.parametrize("interactive", [False, True])
 def test_backend_selection_and_existing_start_flow(
@@ -756,7 +901,9 @@ def test_backend_selection_and_existing_start_flow(
     backend: str, directory: str, port: int, choice: str, label: str,
 ) -> None:
     backend_dir = fake_stack.home / "git" / directory
-    _write_executable(backend_dir / "start.sh", (fake_stack.llm_dir / "start_HQ.sh").read_text())
+    if not backend.endswith("_128k"):
+        _write_executable(backend_dir / "start.sh",
+                          (fake_stack.llm_dir / "start_HQ.sh").read_text())
     if backend == "prism":
         _write_executable(backend_dir / "llama-server",
                           (fake_stack.llm_dir / "start_HQ.sh").read_text())
@@ -800,11 +947,11 @@ def test_backend_selection_and_existing_start_flow(
 
 @pytest.mark.parametrize("interactive", [True, False])
 def test_all_backends_start_stop_and_keep_separate_process_groups(fake_stack, interactive):
-    for directory in ("tabby", "prism"):
+    for directory in ("tabby", "local-model-runtimes/models/prism"):
         backend_dir = fake_stack.home / "git" / directory
         _write_executable(backend_dir / "start.sh",
                           (fake_stack.llm_dir / "start_HQ.sh").read_text())
-        if directory == "prism":
+        if directory.endswith("/prism"):
             _write_executable(backend_dir / "llama-server",
                               (fake_stack.llm_dir / "start_HQ.sh").read_text())
             _write_executable(backend_dir / "start.sh", "#!/bin/sh\nexec ./llama-server\n")
@@ -821,14 +968,17 @@ def test_all_backends_start_stop_and_keep_separate_process_groups(fake_stack, in
         llms = [(cwd, pid) for service, cwd, pid in events if service == "llm"]
         assert {cwd for cwd, _ in llms} == {
             fake_stack.llm_dir, fake_stack.home / "git" / "tabby",
-            fake_stack.home / "git" / "prism",
+            fake_stack.home / "git" / "local-model-runtimes/models/prism",
             (fake_stack.home / "git" / "qwen-next-server"
              / "Qwen3.8-Flash-Next-GSQ-RCO-abliterated-IQ3_XXS"),
             fake_stack.home / "git" / "qwen-next-server" / "Qwen3.8-Flash-Next-Uncensored-IQ3_XXS",
+            fake_stack.home / "git/local-model-runtimes/models/qwen-next/sc117-128k",
+            fake_stack.home / "git/local-model-runtimes/models/qwen-next/orca-128k",
         }
         runtime = fake_stack.runtime / f"st-stack-{os.getuid()}"
         assert (runtime / "llm-backend").read_text().strip() == "all"
-        for engine in ("koboldcpp", "tabbyapi", "prism", "sc117", "orca"):
+        for engine in ("koboldcpp", "tabbyapi", "prism", "sc117", "orca",
+                       "sc117_128k", "orca_128k"):
             assert (runtime / f"llm-{engine}.pgid").exists()
         proxy_pid = next(pid for service, _, pid in events if service == "proxy")
         command = Path(f"/proc/{proxy_pid}/cmdline").read_bytes().split(b"\0")
@@ -840,7 +990,7 @@ def test_all_backends_start_stop_and_keep_separate_process_groups(fake_stack, in
         assert (admin_dir / default_model).resolve() == config
         bootstrap = json.loads((admin_dir / "bootstrap.json").read_text())
         assert bootstrap["nomodel"] is True and bootstrap["usecpu"] is True
-        assert len(llms) == 5
+        assert len(llms) == 7
         for cwd, pid in llms:
             if cwd.parent.name == "qwen-next-server":
                 args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")

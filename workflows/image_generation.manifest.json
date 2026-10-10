@@ -1,0 +1,35 @@
+{
+  "id": "image_generation",
+  "name": "Qwen Image 2.1",
+  "description": "Generate an image from text using the configured Qwen workflow. Read prompt_guidance via describe_workflow before composing the image prompt.",
+  "workflow": "image_generation.json",
+  "prompt_guidance": "prompts/prompt-enhance-scene.md",
+  "parameters": {
+    "prompt": {
+      "type": "string",
+      "description": "The enhanced image description, written according to this workflow's prompt_guidance.",
+      "required": true,
+      "minLength": 1,
+      "maxLength": 12000,
+      "private": true,
+      "target": {"node": "1", "input": "positive_prompt"}
+    },
+    "aspect_ratio": {
+      "type": "string",
+      "description": "Image width-to-height ratio.",
+      "default": "16:9",
+      "enum": ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9"],
+      "target": {"node": "1", "input": "aspect ratio"}
+    },
+    "max_side": {
+      "type": "integer",
+      "description": "Longest image edge in pixels; must be a multiple of 32.",
+      "default": 1600,
+      "minimum": 256,
+      "maximum": 3200,
+      "multipleOf": 32,
+      "target": {"node": "1", "input": "max side"}
+    }
+  },
+  "outputs": [{"node": "3", "adapter": "helto_saved_images"}]
+}

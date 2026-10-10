@@ -12,7 +12,7 @@ from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 
-from .config import BrokerConfig
+from .config import DEFAULT_MCP_WORKFLOWS_DIR, BrokerConfig
 from .errors import BrokerError, ConfigurationError
 from .llm import (
     available_backend_kinds,
@@ -21,6 +21,7 @@ from .llm import (
 )
 from .llm.koboldcpp import KoboldCppBackend
 from .llm.strata import STRATA_KINDS
+from .logging import configure_logging
 from .service import BrokerService
 
 LOG = logging.getLogger(__name__)
@@ -63,6 +64,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--listen-host", default=_env("LISTEN_HOST", "127.0.0.1"))
     parser.add_argument("--chat-port", type=int, default=_env_int("CHAT_PORT", 5001))
     parser.add_argument("--image-port", type=int, default=_env_int("IMAGE_PORT", 8188))
+    parser.add_argument("--mcp-port", type=int, default=_env("MCP_PORT"),
+                        help="enable local MCP on this port")
+    parser.add_argument("--mcp-workflows-dir",
+                        default=_env("MCP_WORKFLOWS_DIR", DEFAULT_MCP_WORKFLOWS_DIR))
+    parser.add_argument("--mcp-output-dir", default=_env("MCP_OUTPUT_DIR"))
+    parser.add_argument("--mcp-input-dir",
+                        default=_env("MCP_INPUT_DIR", "/run/media/veracrypt1/mcp-inputs"))
+    parser.add_argument("--model-profiles", default=_env("MODEL_PROFILES"),
+                        help="JSON model defaults; empty string disables profiles")
     parser.add_argument(
         "--llm-backend",
         choices=available_backend_kinds(),
@@ -80,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prism-url", default=_env("PRISM_URL", "http://127.0.0.1:5006"))
     parser.add_argument("--sc117-url", default=_env("SC117_URL", "http://127.0.0.1:48640"))
     parser.add_argument("--orca-url", default=_env("ORCA_URL", "http://127.0.0.1:48642"))
+    parser.add_argument("--sc117-128k-url", default=_env("SC117_128K_URL", "http://127.0.0.1:48644"))
+    parser.add_argument("--orca-128k-url", default=_env("ORCA_128K_URL", "http://127.0.0.1:48646"))
     parser.add_argument(
         "--kobold-admin-password",
         default=_env("KOBOLD_ADMIN_PASSWORD"),
@@ -185,12 +197,20 @@ def config_from_args(args: argparse.Namespace) -> BrokerConfig:
         listen_host=args.listen_host,
         chat_port=args.chat_port,
         image_port=args.image_port,
+        mcp_port=args.mcp_port,
+        mcp_workflows_dir=args.mcp_workflows_dir,
+        mcp_output_dir=args.mcp_output_dir,
+        mcp_input_dir=args.mcp_input_dir,
+        mcp_token=_env("MCP_TOKEN"),
+        model_profiles=args.model_profiles or None,
         llm_backend=args.llm_backend,
         llm_url=llm_url,
         tabby_url=args.tabby_url,
         prism_url=args.prism_url,
         sc117_url=args.sc117_url,
         orca_url=args.orca_url,
+        sc117_128k_url=args.sc117_128k_url,
+        orca_128k_url=args.orca_128k_url,
         comfy_url=args.comfy_url,
         kobold_admin_password=args.kobold_admin_password,
         kobold_router_mode=args.kobold_router_mode,
@@ -303,10 +323,7 @@ async def run(config: BrokerConfig) -> None:
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    configure_logging(getattr(logging, str(args.log_level).upper(), logging.INFO))
     try:
         config = config_from_args(args)
         if args.write_kobold_model_cache and not args.check_backend:

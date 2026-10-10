@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from aiohttp import ClientError, ClientSession
 
@@ -60,7 +61,7 @@ class ComfyClient:
                 pass
         return PromptResult(buffered, prompt_id)
 
-    async def wait_for_prompt(self, prompt_id: str) -> None:
+    async def wait_for_prompt(self, prompt_id: str) -> dict[str, Any]:
         started = time.monotonic()
         deadline = time.monotonic() + self._config.image_timeout
         consecutive_failures = 0
@@ -109,7 +110,7 @@ class ComfyClient:
                                             prompt_id,
                                             time.monotonic() - started,
                                         )
-                                        return
+                                        return entry.get("outputs", {})
                                 if entry.get("outputs") and not status:
                                     LOG.info(
                                         "ComfyUI job outputs confirmed: prompt_id=%s "
@@ -117,7 +118,7 @@ class ComfyClient:
                                         prompt_id,
                                         time.monotonic() - started,
                                     )
-                                    return
+                                    return entry["outputs"]
             except UpstreamError:
                 raise
             except (ClientError, TimeoutError, ValueError) as exc:

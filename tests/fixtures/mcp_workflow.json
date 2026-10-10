@@ -1,0 +1,123 @@
+{
+  "1": {
+    "inputs": {
+      "model_type": "qwen_image_2_1",
+      "diffusion_model": "synthetic-diffusion_model.safetensors",
+      "text_encoder": "synthetic-text_encoder.safetensors",
+      "vae": "synthetic-vae.safetensors",
+      "positive_prompt": "synthetic template prompt",
+      "negative_prompt": "{\"encrypted\": true, \"ciphertext\": \"synthetic-negative\"}",
+      "use_zero_negative_conditioning": true,
+      "privacy_mode": true,
+      "size mode": "use aspect ratio",
+      "max side": 1600,
+      "aspect ratio": "16:9",
+      "multiple value": "32",
+      "seed": 8853660949473759,
+      "batch_count": 1,
+      "steps": 8,
+      "cfg": 1,
+      "sampler": "res_multistep",
+      "scheduler": "simple",
+      "pid_capture_step": 0,
+      "second_pass_enabled": false,
+      "second_pass_steps": 16,
+      "second_pass_denoise": 0.15,
+      "second_pass_upscale_ratio": 1.5,
+      "second_pass_upscale_method": "lanczos",
+      "model_settings": [
+        "4",
+        0
+      ],
+      "lora_config": [
+        "11",
+        0
+      ],
+      "sigmas": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "AIOImageGenerate",
+    "_meta": {
+      "title": "AIO Image Generate"
+    }
+  },
+  "3": {
+    "inputs": {
+      "folder": "/synthetic-output",
+      "alternative_folder": "/synthetic-output",
+      "use_alternative_folder": true,
+      "use_date_folder": true,
+      "subfolder": "qwen-image21",
+      "filename_prefix": "img",
+      "pause_mode": false,
+      "privacy_mode": true,
+      "save_image": true,
+      "reference_only": false,
+      "release_token": "",
+      "images": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "HeltoSaveImageAdvanced",
+    "_meta": {
+      "title": "Helto Save Image Advanced"
+    }
+  },
+  "4": {
+    "inputs": {
+      "reference_megapixels": 1.6,
+      "edit_canvas": "main controls",
+      "memory_policy": "auto",
+      "cache_device": "auto",
+      "cache_dtype": "default",
+      "attention_mode": "comfy_kitchen_int8",
+      "reference_upscale_method": "lanczos",
+      "sampling_schedule": "comfy"
+    },
+    "class_type": "AIOQwenImage21Settings",
+    "_meta": {
+      "title": "Qwen Image 2.1 Settings"
+    }
+  },
+  "9": {
+    "inputs": {
+      "root": "/synthetic-unused-input",
+      "subfolder": "",
+      "filename": ""
+    },
+    "class_type": "HeltoLoadImageFromRoot",
+    "_meta": {
+      "title": "Helto Load Image From Root"
+    }
+  },
+  "11": {
+    "inputs": {
+      "show_strengths": "single",
+      "match": "",
+      "aio_lora_header": {
+        "type": "aio_lora_header"
+      },
+      "lora_1": {
+        "on": false,
+        "lora": "synthetic-lora.safetensors",
+        "strength": 1
+      }
+    },
+    "class_type": "AIOLoraConfiguration",
+    "_meta": {
+      "title": "AIO LoRA Configuration"
+    }
+  },
+  "13": {
+    "inputs": {
+      "sigmas": "1, 0.978453, 0.954180, 0.926626, 0.895080, 0.845148, 0.704534, 0.414568, 0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "ManualSigmas"
+    }
+  }
+}

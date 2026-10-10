@@ -1,0 +1,123 @@
+{
+  "1": {
+    "inputs": {
+      "model_type": "qwen_image_2_1",
+      "diffusion_model": "diffusion_models/qwen-image2.1/qwen_image_2.1_turbo_bf16.safetensors",
+      "text_encoder": "text_encoders/qwen-image2.1/qwen3vl_8b_int8_convrot.safetensors",
+      "vae": "vae/qwen-image2.1/qwen_image_2.1_vae_bf16.safetensors",
+      "positive_prompt": "{\"version\":1,\"schema\":\"helto.aio-image-generate.v2\",\"encrypted\":true,\"algorithm\":\"AES-256-GCM\",\"keyId\":\"1roEaeczxUSeMw6x\",\"nonce\":\"em4Gr6oD3eZ1nhaH\",\"ciphertext\":\"DACgVMRWblg6WvYDfFaLpKKrxj6bEYtnI1CJbQ\"}",
+      "negative_prompt": "{\"version\":1,\"schema\":\"helto.aio-image-generate.v2\",\"encrypted\":true,\"algorithm\":\"AES-256-GCM\",\"keyId\":\"1roEaeczxUSeMw6x\",\"nonce\":\"iDYoybz8saF3rPyh\",\"ciphertext\":\"jcxkimzlOejGndeWJoXU55fuNF2M3X3TuszE4b3RwweKouIfHLPkuE-aJAvVuXV7GsQ6JFcI5tvjv_sbosdkHEcWUB_oBX8VCRR9u-cfS24PxnmJDFl7NhcXxCmy-gyz1BvS67twZMqlwrhTc32ES6qtf1KsAbWxV6_6xpGqEzdooxjmSwMyLhYWDPgKCV3g8It7QHfVB_TMYXOGP3TYUBLj5Jx-Obv4At6RlqFarOvw5uHKC0mYqIom9ssn8cZ9hNPzXXYat_3fydsSgyPvpyelTS3_vAGG0Tsn6PXrrVwvXw\"}",
+      "use_zero_negative_conditioning": true,
+      "privacy_mode": true,
+      "size mode": "use aspect ratio",
+      "max side": 1600,
+      "aspect ratio": "16:9",
+      "multiple value": "32",
+      "seed": 8853660949473759,
+      "batch_count": 1,
+      "steps": 8,
+      "cfg": 1,
+      "sampler": "res_multistep",
+      "scheduler": "simple",
+      "pid_capture_step": 0,
+      "second_pass_enabled": false,
+      "second_pass_steps": 16,
+      "second_pass_denoise": 0.15,
+      "second_pass_upscale_ratio": 1.5,
+      "second_pass_upscale_method": "lanczos",
+      "model_settings": [
+        "4",
+        0
+      ],
+      "lora_config": [
+        "11",
+        0
+      ],
+      "sigmas": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "AIOImageGenerate",
+    "_meta": {
+      "title": "AIO Image Generate"
+    }
+  },
+  "3": {
+    "inputs": {
+      "folder": "/home/thhel/comfy/output",
+      "alternative_folder": "/run/media/veracrypt1/new",
+      "use_alternative_folder": true,
+      "use_date_folder": true,
+      "subfolder": "qwen-image21",
+      "filename_prefix": "img",
+      "pause_mode": false,
+      "privacy_mode": true,
+      "save_image": true,
+      "reference_only": false,
+      "release_token": "",
+      "images": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "HeltoSaveImageAdvanced",
+    "_meta": {
+      "title": "Helto Save Image Advanced"
+    }
+  },
+  "4": {
+    "inputs": {
+      "reference_megapixels": 1.6,
+      "edit_canvas": "main controls",
+      "memory_policy": "auto",
+      "cache_device": "auto",
+      "cache_dtype": "default",
+      "attention_mode": "comfy_kitchen_int8",
+      "reference_upscale_method": "lanczos",
+      "sampling_schedule": "comfy"
+    },
+    "class_type": "AIOQwenImage21Settings",
+    "_meta": {
+      "title": "Qwen Image 2.1 Settings"
+    }
+  },
+  "9": {
+    "inputs": {
+      "root": "/run/media/veracrypt1/mcp-images",
+      "subfolder": "references",
+      "filename": ""
+    },
+    "class_type": "HeltoLoadImageFromRoot",
+    "_meta": {
+      "title": "Helto Load Image From Root"
+    }
+  },
+  "11": {
+    "inputs": {
+      "show_strengths": "single",
+      "match": "",
+      "aio_lora_header": {
+        "type": "aio_lora_header"
+      },
+      "lora_1": {
+        "on": false,
+        "lora": "qwen-image-21/turbo/qwen_image_2.1_turbo_lora_avg_rank_178_bf16.safetensors",
+        "strength": 1
+      }
+    },
+    "class_type": "AIOLoraConfiguration",
+    "_meta": {
+      "title": "AIO LoRA Configuration"
+    }
+  },
+  "13": {
+    "inputs": {
+      "sigmas": "1, 0.978453, 0.954180, 0.926626, 0.895080, 0.845148, 0.704534, 0.414568, 0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "ManualSigmas"
+    }
+  }
+}

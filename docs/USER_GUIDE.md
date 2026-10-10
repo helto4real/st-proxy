@@ -428,11 +428,11 @@ being activated or processed is not included in those counters.
 - A chat waiting behind images is normal.
 - An image waiting for a streaming chat is normal.
 - Consecutive images reuse the ComfyUI ownership period.
-- After 60 seconds without active or queued work, ComfyUI is freed and the
-  selected LLM is restored and verified.
+- ComfyUI retains ownership until an active LLM request reaches the FIFO head;
+  no idle timer restores a model.
 - Consecutive chats can run concurrently until an image reaches the front of
   the queue.
-- Stop the proxy with `Ctrl+C` so it can restore the LLM safely.
+- Stop the proxy with `Ctrl+C`; shutdown does not restore the LLM.
 - Use `/broker/status` before restarting backends during a handoff.
 
 ## Configuration reference
@@ -441,16 +441,22 @@ Every command-line option has an `ST_PROXY_...` environment equivalent.
 Command-line values override only their corresponding defaults supplied by the
 environment.
 
+For sampling defaults shared across harnesses, see [central model profiles](MODEL_PROFILES.md).
+They only fill missing caller values and ship without a thinking budget.
+
 | Command-line option | Environment variable | Default | Purpose |
 | --- | --- | --- | --- |
 | `--listen-host` | `ST_PROXY_LISTEN_HOST` | `127.0.0.1` | Address used by both proxy listeners |
 | `--chat-port` | `ST_PROXY_CHAT_PORT` | `5001` | SillyTavern chat destination |
 | `--image-port` | `ST_PROXY_IMAGE_PORT` | `8188` | SillyTavern image destination |
 | `--llm-backend` | `ST_PROXY_LLM_BACKEND` | `koboldcpp` | LLM lifecycle adapter |
+| `--model-profiles` | `ST_PROXY_MODEL_PROFILES` | unset for CLI; repository JSON in stack | Central sampling defaults; empty disables |
 | `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific | Real LLM origin |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` | Real ComfyUI origin |
 | `--sc117-url` | `ST_PROXY_SC117_URL` | `http://127.0.0.1:48640` | SC117 origin in all mode |
 | `--orca-url` | `ST_PROXY_ORCA_URL` | `http://127.0.0.1:48642` | Orca origin in all mode |
+| `--sc117-128k-url` | `ST_PROXY_SC117_128K_URL` | `http://127.0.0.1:48644` | SC117 128k origin in all mode |
+| `--orca-128k-url` | `ST_PROXY_ORCA_128K_URL` | `http://127.0.0.1:48646` | Orca 128k origin in all mode |
 | `--prism-model` | `ST_PROXY_PRISM_MODEL` | `prism-bonsai-2-27b-abliterated` | Default Prism preset when model is omitted |
 | `--tabby-model` | `ST_PROXY_TABBY_MODEL` | unset | Native model name for a cold TabbyAPI load |
 | `--tabby-max-seq-len` | `ST_PROXY_TABBY_MAX_SEQ_LEN` | `32768` | Fallback context for the first TabbyAPI load; model profiles override |
@@ -680,7 +686,7 @@ that route to the GPU-sensitive policy before using it alongside the LLM.
 
 The repository includes `st-stack.zsh`, a Linux/Zsh supervisor tailored to the
 repository owner's local multi-service setup. It can supervise a configured
-LLM, or all five engines, and the proxy. It does not manage PocketTTS,
+LLM, or all seven backend profiles, and the proxy. It does not manage PocketTTS,
 SillyTavern, AllTalk, or ComfyUI.
 
 This script is not a portable default installation:
@@ -704,7 +710,8 @@ After adapting it to your environment:
 ```
 
 Choose **1) KoboldCpp**, **2) TabbyAPI**, **3) Prism**, **4) Qwen SC117**,
-or **5) Qwen Orca** for a single engine. Press **Enter** to start all five; see
+**5) Qwen Orca**, **6) Qwen SC117 128k**, or **7) Qwen Orca 128k** for one profile.
+Press **Enter** to start all seven; see
 [all-backend mode](#all-backend-mode).
 
 The interactive KoboldCpp list displays paths relative to `models` and omits
@@ -1075,11 +1082,11 @@ Choose **3) Prism** in `st-stack.zsh`, or skip the menu with:
 ST_PROXY_LLM_BACKEND=prism ./st-stack.zsh
 ```
 
-The stack starts `~/git/prism/start.sh` as a normal managed child process and
+The stack starts `~/git/local-model-runtimes/models/prism/start.sh` as a normal managed child process and
 stops it with the stack. No `prism.service` is used. The native server listens on
 `http://127.0.0.1:5006`; clients use the stack's usual proxy chat URL,
 `http://127.0.0.1:5002/v1`. Select `prism-bonsai-2-27b` for the original model or
-`prism-bonsai-2-27b-abliterated` for Abliterated. Both have a 65536-token context.
+`prism-bonsai-2-27b-abliterated` for Abliterated. Both have a 262144-token context; the TwinTurbo Residual and Abliterated v2 presets use 65536.
 The old unsuffixed ID now refers to the original model, so existing clients that
 want Abliterated must select its new suffixed ID.
 The ordinary `ST_STACK_LLM_DIR`, `ST_STACK_LLM_COMMAND`, and `ST_PROXY_LLM_URL`
@@ -1090,7 +1097,7 @@ IDs and invalid request bodies are rejected before GPU acquisition.
 
 Prism must run its native llama-server **router mode**, with `--models-max 1`,
 `--no-models-autoload`, and `load-on-startup = false` for every preset. This is how the local
-`~/git/prism` installation is configured. Use a dedicated empty `LLAMA_CACHE`
+`~/git/local-model-runtimes/models/prism` installation is configured. Use a dedicated empty `LLAMA_CACHE`
 directory to keep unrelated cached models out of the router's model list.
 The two local model presets look like:
 
@@ -1216,3 +1223,13 @@ without TabbyAPI or Prism-specific transformations. Direct load/unload and
 settings calls through the proxy are blocked. These are text-only profiles.
 Use the proxy endpoint for coordinated requests; direct native API requests
 are outside its GPU lease.
+
+### Qwen context profiles
+
+The original `sc117` and `orca` backends retain their 32768-token configurations.
+`sc117_128k` and `orca_128k` use 131072-token profiles from
+`~/git/local-model-runtimes/models/qwen-next/`. They share the original runtimes
+and weights; only context and operational port/log paths differ. All mode exposes
+separate qualified model IDs and uses the existing unload/load and GPU lease flow.
+Launch overrides use `ST_STACK_SC117_128K_DIR` / `ST_STACK_SC117_128K_COMMAND`
+and the equivalent `ORCA_128K` variables.

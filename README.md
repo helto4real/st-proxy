@@ -12,12 +12,13 @@ Supported LLM backends:
 - Prism, controlled through the native llama-server router load/unload API.
   Choose **3) Prism** in `st-stack.zsh`; see [Prism setup](docs/USER_GUIDE.md#prism--ternary-bonsai).
 - Qwen SC117 and Qwen Orca, controlled through Strata’s native load/unload API.
-  Choose **4) Qwen SC117** or **5) Qwen Orca**; both start unloaded.
+  Choose **4) Qwen SC117** or **5) Qwen Orca** for the existing 32k profiles,
+  or **6) Qwen SC117 128k** / **7) Qwen Orca 128k**. All start unloaded.
 
-In `st-stack.zsh`, **Enter starts all five backends together**;
+In `st-stack.zsh`, **Enter starts all seven backend profiles together**;
 choices **1–5** select a single engine. All mode publishes their native
 model catalogs through one `/v1/models`, using `koboldcpp/…`, `tabbyapi/…` and
-`prism/…`, `sc117/…` and `orca/…` IDs. Select an exact returned ID in the client. One shared FIFO keeps
+`prism/…`, `sc117/…`, `orca/…`, `sc117_128k/…` and `orca_128k/…` IDs. Select an exact returned ID in the client. One shared FIFO keeps
 model loading, complete streamed responses and ComfyUI workflows mutually
 exclusive on the GPU. See [all-backend setup](docs/USER_GUIDE.md#all-backend-mode).
 
@@ -324,12 +325,17 @@ Example idle response:
 
 Every command-line setting has an `ST_PROXY_...` environment equivalent.
 
+The stack enables [central model profiles](docs/MODEL_PROFILES.md) from
+`config/model-profiles.json`. They fill missing sampling values; caller values
+always win. No thinking budget is supplied by the shipped profiles.
+
 | CLI option | Environment variable | Default |
 | --- | --- | --- |
 | `--listen-host` | `ST_PROXY_LISTEN_HOST` | `127.0.0.1` |
 | `--chat-port` | `ST_PROXY_CHAT_PORT` | `5001` |
 | `--image-port` | `ST_PROXY_IMAGE_PORT` | `8188` |
 | `--llm-backend` | `ST_PROXY_LLM_BACKEND` | `koboldcpp` |
+| `--model-profiles` | `ST_PROXY_MODEL_PROFILES` | unset for CLI; stack uses `config/model-profiles.json`; empty disables |
 | `--prism-model` | `ST_PROXY_PRISM_MODEL` | `prism-bonsai-2-27b-abliterated` |
 | `--llm-url` | `ST_PROXY_LLM_URL` | backend-specific |
 | `--comfy-url` | `ST_PROXY_COMFY_URL` | `http://127.0.0.1:8189` |
@@ -404,11 +410,23 @@ backends, HTTP errors are logged as soon as their response headers arrive, witho
 logging response bodies. The proxy's log is visible in `st-stack.zsh` even without
 `--log`; that flag additionally shows the underlying services' own output.
 
+Terminal logs use Catppuccin Mocha colors for levels, backends, HTTP statuses,
+durations, and handoff states. Redirected output stays plain; set `NO_COLOR=1`
+to disable colors in a terminal. Log content and levels are unchanged.
+With `st-stack.zsh --log`, Strata's `[strata]` lines also highlight startup,
+prompt reading, generation, completion, and numeric metrics using the same palette.
+
 The broker enforces logical GPU ownership through verified application
 lifecycle APIs; it is not a kernel GPU access-control layer. For a hard
 single-ingress boundary, keep backend ports on an internal container or network
 namespace and publish only the two broker ports. A second loopback port prevents
 accidental use but does not prevent another local process from connecting to it.
+
+## Agent image generation (MCP)
+
+For optional agent-driven text-to-image generation, see [the MCP guide](docs/MCP.md).
+It covers approved manifests, Helto privacy, local image results and reconnecting
+to jobs without changing the existing request-driven GPU policy.
 
 ## Automated tests: isolated and safe
 
