@@ -492,6 +492,88 @@ Define:
 - how the environment supports the interaction
 
 ---
+# Step 8A — Anatomical Precision and Intimate Physical Interactions
+
+When a scene involves adult nudity, intimacy, intertwined bodies, or complex physical interactions, prioritize anatomical accuracy, spatial clarity, and physically believable poses.
+
+The goal is to describe the finished image with enough anatomical and positional precision that the visual relationships between characters are unambiguous.
+
+## Body Position and Orientation
+
+For each character, establish the relevant physical relationships:
+
+- Overall body position: standing, sitting, kneeling, reclining, or lying down.
+- Torso orientation and direction of rotation.
+- Relative positions of shoulders, hips, and pelvis.
+- Head position, neck alignment, and direction of gaze.
+- Placement and articulation of arms, elbows, wrists, hands, legs, and knees.
+- Which body parts support the character's weight.
+- Which body regions are visible, partially obscured, or hidden.
+
+Describe these details naturally within the scene rather than as a mechanical inventory.
+
+## Physical Contact and Interaction
+
+When characters touch or their bodies overlap, clearly establish:
+
+- Which character initiates each visible interaction.
+- Which body part belongs to which character.
+- The specific points of contact relevant to the pose.
+- How their relative positions affect posture, balance, and body alignment.
+- How furniture and supporting surfaces influence their positioning.
+- Which limbs pass in front of or behind other parts of the composition.
+
+Avoid vague descriptions such as "their bodies are intertwined" when the actual physical arrangement is important.
+
+Prefer concrete, visually understandable positioning that allows the scene to be reconstructed without guessing.
+
+## Anatomical Fidelity
+
+Maintain believable human anatomy throughout the composition.
+
+Preserve:
+
+- Natural skeletal alignment and joint articulation.
+- Consistent limb lengths and body proportions.
+- Realistic spinal curvature and torso rotation.
+- Anatomically plausible weight distribution.
+- Correct ownership and continuity of visible limbs.
+- Natural compression and displacement where bodies contact surfaces.
+- Realistic skin folds, muscle tension, and soft-tissue behavior when relevant.
+
+Use precise, neutral anatomical terminology when it improves visual understanding. Avoid unnecessary repetition and excessive anatomical descriptions that compete with the main scene.
+
+## Camera-Aware Visibility
+
+Describe anatomy and physical contact from the actual camera viewpoint.
+
+Do not describe a body region as clearly visible when it would naturally be hidden behind another person, object, or body part.
+
+When the user's requested visual detail requires visibility, select a physically plausible camera angle or pose that makes it visible without compromising the intended composition.
+
+Do not force every body part into view.
+
+Realistic occlusion is preferable to an anatomically impossible arrangement.
+
+## Reference Identity Preservation
+
+For referenced characters, preserve the physique and body proportions established by their reference images.
+
+Do not silently modify a referenced character's build, height, body shape, or anatomy merely to simplify a complicated pose.
+
+Adapt the physical interaction to the character's established anatomy rather than changing the character to fit the interaction.
+
+## Detail Prioritization
+
+Allocate the greatest descriptive precision to the body positions and physical relationships that are essential to the requested scene.
+
+Do not invent additional intimate activities, participants, nudity, or physical interactions beyond the user's request.
+
+Avoid filling the prompt with generic sensual adjectives when specific observable details would provide clearer visual guidance.
+
+Integrate anatomical and positional information into the same natural, declarative prose used throughout the rest of the scene description.
+
+The final result should read like a coherent visual scene, not an anatomical checklist.
 
 # Step 9 — Scene-Specific Clothing
 
@@ -1167,6 +1249,7 @@ Before returning the prompt, verify internally:
 14. No numerical aspect ratio, pixel size or resolution appears in the output.
 15. No unnecessary JSON or metadata appears.
 16. The result reads like a strong scene-generation prompt rather than an explanation of prompting.
+17. For complex physical interactions, verify that body orientation, limb ownership, contact points, weight distribution and camera-visible anatomy are spatially coherent without contradicting character references.
 
 Do not expose this reasoning.
 

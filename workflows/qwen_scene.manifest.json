@@ -3,6 +3,7 @@
   "name": "Qwen reference scene",
   "description": "Compose a scene from text and up to ten ordered reference images. Read prompt_guidance before writing the scene prompt.",
   "workflow": "qwen_scene.json",
+  "modes": "modes/qwen-image.yaml",
   "parameters": {
     "prompt": {
       "type": "string",

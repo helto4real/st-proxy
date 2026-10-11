@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigurationError
+from .workflow_modes import ModeError, ModeFiles, WorkflowModes
 
 LOG = logging.getLogger(__name__)
 SCHEMA_KEYS = {"type", "description", "default", "enum", "minimum", "maximum",
@@ -71,6 +72,7 @@ class Workflow:
     graph: dict[str, Any]
     source_roots: dict[str, Path]
     prompt_guidance: str | None = None
+    modes: WorkflowModes | None = None
 
     @property
     def references(self) -> dict[str, Any] | None:
@@ -82,6 +84,8 @@ class Workflow:
 
     @property
     def parameters(self) -> dict[str, Any]:
+        if self.modes is not None:
+            return {**self.manifest["parameters"], "mode": self.modes.parameter()}
         return self.manifest["parameters"]
 
     @property
@@ -130,6 +134,11 @@ class Workflow:
     def build(self, values: dict[str, Any],
               references: list[dict[str, str]] | None = None) -> dict[str, Any]:
         graph = copy.deepcopy(self.graph)
+        if self.modes is not None:
+            try:
+                self.modes.apply(graph, values.get("mode", self.modes.default))
+            except ModeError as exc:
+                raise WorkflowError(str(exc)) from None
         references = references or []
         spec = self.references
         if references and (spec is None or len(references) > len(spec["inputs"])):
@@ -147,6 +156,8 @@ class Workflow:
                 graph[node_id] = loader
                 inputs[spec["inputs"][index]] = [node_id, 0]
         for name, value in values.items():
+            if name == "mode" and self.modes is not None:
+                continue
             target = self.parameters[name]["target"]
             graph[target["node"]]["inputs"][target["input"]] = value
         for output in self.outputs:
@@ -155,7 +166,8 @@ class Workflow:
         return graph
 
     @classmethod
-    def load(cls, manifest: dict[str, Any], directory: Path, max_bytes: int) -> Workflow:
+    def load(cls, manifest: dict[str, Any], directory: Path, max_bytes: int,
+             mode_files: ModeFiles | None = None) -> Workflow:
         if not isinstance(manifest, dict):
             raise WorkflowError("manifest must be an object")
         for key in ("id", "name", "description", "workflow"):
@@ -268,7 +280,16 @@ class Workflow:
             if len(raw) > 65536:
                 raise WorkflowError("prompt guidance exceeds 64 KiB")
             guidance = raw.decode("utf-8")
-        return cls(copy.deepcopy(manifest), graph, roots, guidance)
+        modes = None
+        if "modes" in manifest:
+            if "mode" in parameters:
+                raise WorkflowError("mode is reserved when a modes file is configured")
+            try:
+                modes = (mode_files or ModeFiles()).load(manifest["modes"], directory, max_bytes)
+                modes.validate_targets(graph, parameters, outputs, references)
+            except ModeError as exc:
+                raise WorkflowError(str(exc)) from None
+        return cls(copy.deepcopy(manifest), graph, roots, guidance, modes)
 
 
 class WorkflowCatalog:
@@ -277,6 +298,7 @@ class WorkflowCatalog:
         if not root.is_dir():
             raise ConfigurationError("MCP workflow directory does not exist")
         self.workflows: dict[str, Workflow] = {}
+        mode_files = ModeFiles()
         seen = set()
         for path in sorted(root.glob("*.manifest.json")):
             try:
@@ -289,7 +311,7 @@ class WorkflowCatalog:
                         self.workflows.pop(identifier, None)
                         raise WorkflowError("duplicate workflow id")
                     seen.add(identifier)
-                workflow = Workflow.load(manifest, root, max_bytes)
+                workflow = Workflow.load(manifest, root, max_bytes, mode_files)
                 self.workflows[workflow.id] = workflow
             except (OSError, ValueError, TypeError, OverflowError, RecursionError) as exc:
                 reason = str(exc) if isinstance(exc, WorkflowError) else "unreadable definition"

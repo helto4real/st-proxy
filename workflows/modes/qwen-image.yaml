@@ -1,0 +1,45 @@
+# Read once at proxy startup. Node IDs and input names refer to the API export.
+# Quick draft keeps the exported turbo settings; standard uses the configured 40-step model.
+version: 1
+default: standard
+modes:
+  "quick draft":
+    description: >-
+      Use for quick previews, composition tests and exploring ideas.
+      Choose when the user requests a draft or prioritizes speed.
+    set:
+      "1":
+        steps: 8
+        cfg: 1
+        sampler: res_multistep
+        scheduler: simple
+        diffusion_model: diffusion_models/qwen-image2.1/qwen_image_2.1_turbo_bf16.safetensors
+        sigmas: ["13", 0]
+      "11":
+        lora_1:
+          on: false
+          lora: qwen-image-21/turbo/qwen_image_2.1_turbo_lora_avg_rank_178_bf16.safetensors
+          strength: 1
+      "13":
+        sigmas: >-
+          1, 0.978453, 0.954180, 0.926626, 0.895080,
+          0.845148, 0.704534, 0.414568, 0
+  standard:
+    description: >-
+      Default for normal image generation and finished images.
+      Use unless the user requests a quick draft or prioritizes speed.
+    set:
+      "1":
+        steps: 40
+        cfg: 2.5
+        sampler: er_sde
+        scheduler: beta
+        diffusion_model: diffusion_models/qwen-image2.1/qwen_image_2.1_int8_convrot.safetensors
+      "11":
+        lora_1:
+          on: false
+          lora: qwen-image-21/turbo/qwen_image_2.1_turbo_lora_avg_rank_178_bf16.safetensors
+          strength: 1
+    remove:
+      "1":
+        - sigmas

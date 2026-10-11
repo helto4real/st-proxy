@@ -13,11 +13,13 @@ dependencies = ["aiohttp>=3.10,<4"]
 
 [project.optional-dependencies]
 mcp = [
+  "pyyaml>=6.0.3,<7",
   "pillow>=12.3,<13",
   "mcp>=2.3,<3",
   "uvicorn>=0.54,<1",
 ]
 dev = [
+  "pyyaml>=6.0.3,<7",
   "pillow>=12.3,<13",
   "pytest>=8.3",
   "ruff>=0.11",

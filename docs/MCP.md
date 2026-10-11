@@ -41,8 +41,9 @@ The supplied `workflows/image_generation.manifest.json` references
 `image_generation.json`. It exposes `prompt` (mapped to `positive_prompt`),
 `aspect_ratio` (default `16:9`) and `max_side` (default `1600`) on node `1`, and
 uses node `3` for Helto output. Max side accepts 256–3200 pixels in steps of 32,
-matching the export's sizing controls. Seed and other generation settings come
-from the export. The original export remains unchanged.
+matching the export's sizing controls. The virtual `mode` parameter defaults to
+`standard`; its operator-owned YAML controls the model, sampling and LoRAs described
+below. Remaining settings, including seed, come from the unchanged API export.
 
 For text-to-image, `describe_workflow("image_generation")` returns
 `prompts/prompt-enhance-scene.md` verbatim as `prompt_guidance`. The agent reads it
@@ -88,7 +89,8 @@ Use your export's actual node IDs. Workflow files must resolve inside the catalo
 directory. Restart after changes. Invalid definitions are logged and unavailable;
 other workflows remain usable. Duplicate IDs disable all definitions with that ID.
 
-Only mapped inputs and selected reference/output adapters' required contracts are checked.
+Only mapped inputs, explicit mode targets and selected reference/output adapters' contracts
+are checked.
 Other nodes, classes, inputs, links and metadata stay opaque and are forwarded
 unchanged. Adding nodes does not require a manifest update. ComfyUI still
 performs its own runtime validation.
@@ -104,6 +106,95 @@ the value sent to ComfyUI. Like Dreamchat, st-proxy writes prompt text directly
 into the mapped input and submits the workflow to `/prompt`. No separate prompt
 encryption request or Helto privacy token is needed. Unmapped values, including
 encrypted negative prompts and privacy settings, remain unchanged in the export.
+
+## YAML generation modes
+
+Both supplied manifests reference `"modes": "modes/qwen-image.yaml"`. Edit
+`workflows/modes/qwen-image.yaml` to change `quick draft` and `standard`. It is read once
+per catalog at proxy startup, shared by both workflows; edits require a restart
+to take effect. There is no per-request file reading or hot reload.
+
+Quick draft keeps the API export's values: 8 steps, cfg 1, `res_multistep`,
+`simple`, and `qwen_image_2.1_turbo_bf16.safetensors`. Standard uses 40 steps,
+cfg 2.5, `er_sde`, `beta`, and `qwen_image_2.1_int8_convrot.safetensors`.
+Both profiles retain the **disabled** LoRA at strength 1. Quick draft keeps
+`sigmas: ["13", 0]` and exposes node 13's sigma list in YAML. Standard removes
+node 1's `sigmas` input. The disconnected ManualSigmas node remains in the graph.
+
+The mode descriptions tell the agent to use standard for normal generation and
+finished images, and quick draft for previews, composition tests or requests
+that prioritize speed.
+
+With manual sigmas connected, the list determines the actual step count and
+sampling schedule; editing `steps` or `scheduler` alone does not change those.
+Without that connection, the current workflow's `sampling_schedule: comfy`
+uses the configured steps and scheduler.
+
+The YAML structure is `version: 1`, a `default` mode name, and a `modes` mapping.
+Each mode has a `description` and optional `set` / `remove` mappings. For example:
+
+```yaml
+version: 1
+default: standard
+modes:
+  "quick draft":
+    description: Use for quick previews, composition tests and exploring ideas.
+    set:
+      "1":
+        steps: 8
+        cfg: 1
+        sampler: res_multistep
+        scheduler: simple
+        sigmas: ["13", 0]
+  standard:
+    description: Default for normal image generation and finished images.
+    set:
+      "1":
+        steps: 40
+        cfg: 2.5
+        sampler: er_sde
+        scheduler: beta
+    remove:
+      "1": [sigmas]
+```
+
+Use quoted node IDs and the API export's exact input names (including
+`diffusion_model`). `set` replaces entire input values, including LoRA objects;
+it does not merge their fields. To add a LoRA, explicitly add `lora_2` under
+node `"11"`, with its complete `on`, `lora`, and `strength` values. Unlisted inputs
+retain their export values. `remove` removes only the named inputs from the job
+copy; removing an already absent input is harmless. Each mode starts from a
+fresh export copy, never from the preceding job or another mode.
+
+YAML uses safe loading, unique string keys and finite JSON-compatible values.
+Use `true` / `false` for booleans; `on` remains a string key. Files must stay
+within the workflow directory and fit the workflow byte limit, including expanded
+content. Duplicate keys, conflicting set/remove patches, missing target nodes,
+and overlaps with agent parameter mappings or adapter-owned reference/output
+controls make the affected workflows unavailable. New inputs on existing nodes
+are allowed. The proxy does not check model/LoRA inventories or validate unrelated
+nodes and connections; ComfyUI performs its normal runtime validation.
+
+`describe_workflow` exposes available names, descriptions and default through
+`parameters.properties.mode`. The agent chooses a mode, not arbitrary graph
+patches. To add `high quality` later, add a `"high quality"` entry under `modes`
+with its description and set/remove patches, then restart the proxy. No Python
+change is required. Each mode starts from the export, so copy any patches you
+want to share with standard. Manifests without a modes file retain their existing behavior.
+
+For `generate`, pass `"parameters": {"prompt": "...", "mode": "quick draft"}`.
+Omitting `mode` selects `standard`. Mode names include spaces exactly as written
+in YAML; the old `turbo` and `quality` names are no longer configured.
+Each batch item can select its own mode, either as a flat parameter object or
+inside `parameters` when using references. Modes are applied before ordinary
+parameters and reference/output adapters. All items are prepared before queueing;
+mixed modes retain the original batch order and GPU reservation, without sorting
+by model. ComfyUI may need to load a different image model between items.
+
+The resolved mode appears in public result parameters and job identity. Omitted
+mode and explicit default are equivalent for retries; changing a mode under an
+existing job ID returns a conflict. Restarting clears the existing in-memory job
+registry as before.
 
 ## Reference scenes and prompt guidance
 

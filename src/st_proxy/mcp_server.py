@@ -95,8 +95,9 @@ class McpListener:
 
         @sdk.tool(annotations=readonly)
         def describe_workflow(workflow_id: str) -> CallToolResult:
-            """Get parameters, reference limits and optional prompt_guidance; no GPU acquisition.
+            """Get parameters, available modes, reference limits and optional prompt_guidance.
 
+            No GPU acquisition. Select parameters.mode from its enum when available.
             Apply guidance when writing parameters.prompt, then call generate or generate_batch.
             """
             try:
@@ -126,6 +127,7 @@ class McpListener:
             """Generate and wait for saved images. Prefer generate_batch for multiple prompts.
 
             Optional references are registered image IDs ordered as <image1>, <image2>, etc.
+            Choose parameters.mode from describe_workflow, or omit it for the configured default.
             Reuse job_id to recover a lost response.
             """
             try:
@@ -143,6 +145,8 @@ class McpListener:
             [{"prompt": "a forest"}, {"prompt": "a lake", "aspect_ratio": "16:9"}].
             With references, use {"parameters": {"prompt": "..."}, "references": ["image_id"]}
             per item. Reference order maps to <image1>, <image2>, etc. for that item.
+            Each item may select its own mode from describe_workflow via parameters.mode
+            (or mode directly in a flat item); omitting it uses the configured default.
             Items run consecutively in FIFO order, within the configured image queue limit
             (32 by default). All parameters are validated before anything is queued.
             Results have zero-based item indices, individual status and saved image paths;

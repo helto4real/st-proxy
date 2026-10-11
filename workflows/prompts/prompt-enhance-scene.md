@@ -131,6 +131,86 @@ The final output should normally remain one continuous paragraph.
 
 Only use multiple paragraphs when the image is genuinely composed of stacked or separated regions such as panels, cards, sections, or slides. In that case, each paragraph should correspond to a region and begin by establishing its position.
 
+## Step 5A — Anatomical Precision and Complex Physical Interactions
+
+When a scene involves adult nudity, intimacy, intertwined bodies, or anatomically complex poses, increase the precision of physical descriptions.
+
+The objective is to establish clear, anatomically believable relationships between characters while maintaining natural, visually rich scene descriptions.
+
+### Character Anatomy
+
+For each important character, establish a coherent physical appearance:
+
+- Natural body proportions, physique, and relative height.
+- Shoulder width, torso shape, waist, hips, and limb proportions when visually relevant.
+- Anatomically plausible skeletal alignment and joint articulation.
+- Natural muscle definition, skin folds, and soft-tissue behavior.
+- Physical characteristics consistent across all visible body regions.
+
+Prefer precise anatomical descriptions over generic beauty or quality adjectives.
+
+### Body Positioning and Orientation
+
+For complex poses and interactions, establish:
+
+- Whether each character is standing, sitting, kneeling, reclining, or lying down.
+- The orientation of the torso, shoulders, hips, and pelvis.
+- The placement and direction of arms, hands, legs, and feet.
+- The position of each character relative to the others.
+- The surfaces supporting each character's weight.
+- Natural balance, weight distribution, and body alignment.
+
+Describe positions in sufficient detail to make the physical arrangement understandable without unnecessary repetition.
+
+### Physical Contact and Interaction
+
+When characters physically interact, specify:
+
+- Which character performs each visible action.
+- Which body parts belong to each character.
+- Relevant points of physical contact.
+- How their positions affect balance and posture.
+- How bodies naturally overlap and partially obscure each other.
+- The placement of hands and limbs when essential to understanding the interaction.
+
+Avoid vague descriptions of intertwined or overlapping bodies when more precise spatial descriptions would improve anatomical clarity.
+
+### Camera-Aware Anatomy
+
+Describe the visible anatomy from the actual camera viewpoint.
+
+Ensure that:
+
+- Visible body regions are consistent with the described camera angle.
+- Hidden anatomy remains naturally occluded.
+- Limb continuity is physically plausible.
+- Perspective and foreshortening are anatomically coherent.
+- The framing supports the important physical interactions.
+
+When visibility is important, choose a plausible pose or camera angle rather than introducing impossible anatomy.
+
+### Anatomical Detail Priority
+
+Allocate additional descriptive detail to physically complex regions and interactions.
+
+Use anatomically accurate, neutral terminology where it improves clarity.
+
+Describe only details relevant to the requested scene and visible composition.
+
+Do not invent additional intimate activities, nudity, or physical interactions beyond the user's request.
+
+### Integration with Scene Description
+
+Incorporate physical and anatomical details naturally into the finished-image description.
+
+Avoid turning the output into an anatomical checklist.
+
+Preserve the user's requested actions, positions, character appearances, and visual intent.
+
+For ordinary scenes without complex physical interactions, apply only the normal level of anatomical precision.
+
+The final description should remain visually coherent, physically believable, and consistent with the established photographic or artistic style.
+
 ## Step 6 — Describe visible text exactly
 
 Skip this step entirely when no readable text belongs in the image.
@@ -360,6 +440,8 @@ Neighbouring objects should maintain believable scale unless the user explicitly
 Surfaces should react naturally to objects resting on them.
 
 If the user requests something physically impossible or fantastical, describe the requested element as genuinely present while keeping the rest of the scene internally coherent.
+
+For scenes involving multiple interacting people or complex poses, verify anatomical continuity, limb ownership, body orientation, contact points, weight distribution, and camera-visible anatomy before finalizing the description.
 
 ## Language
 
