@@ -50,6 +50,7 @@ def test_shipped_modes_apply_current_profiles_without_changing_exports(workflow_
     del expected["1"]["inputs"]["sigmas"]
     expected["1"]["inputs"].update({
         "steps": 40, "cfg": 2.5, "sampler": "er_sde", "scheduler": "beta",
+        "use_zero_negative_conditioning": False,
         "diffusion_model": "diffusion_models/qwen-image2.1/qwen_image_2.1_int8_convrot.safetensors",
     })
     assert workflow.build(workflow.normalize({"prompt": "test"})) == expected

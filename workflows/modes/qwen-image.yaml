@@ -11,6 +11,7 @@ modes:
       "1":
         steps: 8
         cfg: 1
+        use_zero_negative_conditioning: true
         sampler: res_multistep
         scheduler: simple
         diffusion_model: diffusion_models/qwen-image2.1/qwen_image_2.1_turbo_bf16.safetensors
@@ -32,6 +33,7 @@ modes:
       "1":
         steps: 40
         cfg: 2.5
+        use_zero_negative_conditioning: false
         sampler: er_sde
         scheduler: beta
         diffusion_model: diffusion_models/qwen-image2.1/qwen_image_2.1_int8_convrot.safetensors

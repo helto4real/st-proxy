@@ -121,6 +121,11 @@ Both profiles retain the **disabled** LoRA at strength 1. Quick draft keeps
 `sigmas: ["13", 0]` and exposes node 13's sigma list in YAML. Standard removes
 node 1's `sigmas` input. The disconnected ManualSigmas node remains in the graph.
 
+Both profiles expose `use_zero_negative_conditioning` under node `"1"` in YAML.
+Standard sets it to `false`, allowing the workflow's negative prompt to be used
+with CFG above 1. Quick draft retains `true`, which uses zeroed negative
+conditioning. Change the boolean per mode and restart to apply it.
+
 The mode descriptions tell the agent to use standard for normal generation and
 finished images, and quick draft for previews, composition tests or requests
 that prioritize speed.
