@@ -1,0 +1,128 @@
+{
+  "1": {
+    "inputs": {
+      "model_type": "qwen_image_2_1",
+      "diffusion_model": "diffusion_models/qwen-image2.1/qwen_image_2.1_turbo_bf16.safetensors",
+      "text_encoder": "clip/qwen-image2.1/qwen3vl_8b_int8_convrot.safetensors",
+      "vae": "vae/qwen-image2.1/texture_fix_vae_for_qwen_image_2.1_bf16.safetensors",
+      "positive_prompt": "{\"version\":1,\"schema\":\"helto.aio-image-generate.v2\",\"encrypted\":true,\"algorithm\":\"AES-256-GCM\",\"keyId\":\"1roEaeczxUSeMw6x\",\"nonce\":\"gVcQLbKe3xbdJTdC\",\"ciphertext\":\"p3Fr1A0daElseIDBq-Gi4SDSBDUwQO_TtYnfHj92zoxEdMprA3nkMJrnoqOOhpmSzTKNgoiyHnQUOTP1xaZQ_YuzK4aV-LhH82QWH3-dCyQGcJfqx9Tw7SVT3gS02fT3hEbz1le8XiQwZk0vH-tMBoR1anczO95BzEP2ruaK6rtwhHhhRN1XbxzjC6e_xkOCGXTxNw0LPPVpmo9_3l62CwmS4v_4xXL-xIVUjD6xzGgiSAbl-eu7oLGtzu819aURKuCQyU1bBuNdD0pO6atf66F-X5yvGuLRgvLOgWp-wl9twElqt6JjNu1k0gugQTRYiV7w72S4KryojvNp5bWqEYctAS_5NrMmu8Vpq-ifxGmT_9I1bYnM5ZHsJh8aQL8KQ8iF7tEJhTEOqDvONLIBDH148Tp_9lGgZfxaKax8mWiuVQiT6DCk-9C_L0JpnuMy-_NItRWAGIZyJ8vbPvD2BbwIb-fYr6928Yxk8113WDLJJjKQTpNl8aC3vVrUj_gMVtiz0v4\"}",
+      "negative_prompt": "{\"version\":1,\"schema\":\"helto.aio-image-generate.v2\",\"encrypted\":true,\"algorithm\":\"AES-256-GCM\",\"keyId\":\"1roEaeczxUSeMw6x\",\"nonce\":\"FVgw0o0qi-124ZXo\",\"ciphertext\":\"mhALK6wJ9KKwbiVTNkO7B-j9FOKdsUYTV1WIOA\"}",
+      "use_zero_negative_conditioning": true,
+      "privacy_mode": true,
+      "size mode": "use image 1 aspect ratio",
+      "max side": 3200,
+      "aspect ratio": "16:9",
+      "multiple value": "32",
+      "seed": 2556737326279876,
+      "batch_count": 1,
+      "steps": 8,
+      "cfg": 1,
+      "sampler": "euler",
+      "scheduler": "simple",
+      "pid_capture_step": 0,
+      "second_pass_enabled": false,
+      "second_pass_steps": 0,
+      "second_pass_denoise": 0.15,
+      "second_pass_upscale_ratio": 1.5,
+      "second_pass_upscale_method": "lanczos",
+      "model_settings": [
+        "4",
+        0
+      ],
+      "lora_config": [
+        "9",
+        0
+      ],
+      "sigmas": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "AIOImageGenerate",
+    "_meta": {
+      "title": "AIO Image Generate"
+    }
+  },
+  "2": {
+    "inputs": {
+      "folder": "/home/thhel/comfy/output",
+      "alternative_folder": "/run/media/veracrypt1/new",
+      "use_alternative_folder": true,
+      "use_date_folder": true,
+      "subfolder": "upscaled",
+      "filename_prefix": "img",
+      "pause_mode": false,
+      "privacy_mode": true,
+      "save_image": true,
+      "reference_only": false,
+      "release_token": "",
+      "images": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "HeltoSaveImageAdvanced",
+    "_meta": {
+      "title": "Helto Save Image Advanced"
+    }
+  },
+  "4": {
+    "inputs": {
+      "reference_megapixels": 0,
+      "edit_canvas": "main controls",
+      "memory_policy": "auto",
+      "cache_device": "auto",
+      "cache_dtype": "default",
+      "attention_mode": "comfy_kitchen_int8",
+      "reference_upscale_method": "lanczos",
+      "sampling_schedule": "comfy",
+      "color_match_strength": 1,
+      "color_match": true,
+      "brightness_strength": 0,
+      "contrast_strength": 0.5,
+      "microcontrast_strength": 0
+    },
+    "class_type": "AIOQwenImage21Settings",
+    "_meta": {
+      "title": "Qwen Image 2.1 Settings"
+    }
+  },
+  "5": {
+    "inputs": {
+      "sigmas": "1, 0.978453, 0.954180, 0.926626, 0.895080, 0.845148, 0.704534, 0.414568, 0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "ManualSigmas"
+    }
+  },
+  "6": {
+    "inputs": {
+      "root": "/run/media/veracrypt1/dreamchat-images",
+      "subfolder": "dreamchat-image-root",
+      "filename": ""
+    },
+    "class_type": "HeltoLoadImageFromRoot",
+    "_meta": {
+      "title": "Helto Load Image From Root"
+    }
+  },
+  "9": {
+    "inputs": {
+      "show_strengths": "single",
+      "match": "",
+      "aio_lora_header": {
+        "type": "aio_lora_header"
+      },
+      "lora_1": {
+        "on": true,
+        "lora": "qwen-image-21/qwen-image-2.1-consistency.safetensors",
+        "strength": 1
+      }
+    },
+    "class_type": "AIOLoraConfiguration",
+    "_meta": {
+      "title": "AIO LoRA Configuration"
+    }
+  }
+}

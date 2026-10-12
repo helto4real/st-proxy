@@ -1,0 +1,35 @@
+{
+  "id": "image_upscale",
+  "name": "Qwen Image 2.1 Upscale",
+  "description": "Upscale one registered image with the stored Qwen enhancement prompt. Preserve its aspect ratio; choose only max_side. Exactly one reference image is required.",
+  "workflow": "image_upscale.json",
+  "parameters": {
+    "max_side": {
+      "type": "integer",
+      "description": "Maximum longest output edge in pixels; must be a multiple of 32.",
+      "default": 3200,
+      "minimum": 256,
+      "maximum": 3200,
+      "multipleOf": 32,
+      "target": {
+        "node": "1",
+        "input": "max side"
+      }
+    }
+  },
+  "references": {
+    "adapter": "helto_root_images",
+    "generator": "1",
+    "loader": "6",
+    "inputs": [
+      "image 1"
+    ],
+    "minItems": 1
+  },
+  "outputs": [
+    {
+      "node": "2",
+      "adapter": "helto_saved_images"
+    }
+  ]
+}

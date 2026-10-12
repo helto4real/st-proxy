@@ -119,11 +119,25 @@ class Workflow:
             result["prompt_guidance"] = self.prompt_guidance
         if self.references is not None:
             result["references"] = {
-                "minItems": 0, "maxItems": len(self.references["inputs"]),
+                "minItems": self.references.get("minItems", 0),
+                "maxItems": len(self.references["inputs"]),
                 "description": "Register images first; ordered image IDs map to <image1>, "
-                               "<image2>, etc. An empty list generates without references.",
+                               "<image2>, etc. " + (
+                                   "An empty list generates without references."
+                                   if self.references.get("minItems", 0) == 0 else
+                                   "This workflow requires reference images."
+                               ),
             }
         return result
+
+    def validate_reference_count(self, count: int) -> None:
+        spec = self.references
+        minimum = spec.get("minItems", 0) if spec else 0
+        maximum = len(spec["inputs"]) if spec else 0
+        if count < minimum:
+            raise WorkflowError(f"workflow requires at least {minimum} reference image(s)")
+        if count > maximum:
+            raise WorkflowError("workflow does not support this number of references")
 
     def normalize(self, parameters: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(parameters, dict) or parameters.keys() - self.parameters.keys():
@@ -159,8 +173,7 @@ class Workflow:
                 graph[self.nsfw_loras["node"]]["inputs"][name]["on"] = enabled
         references = references or []
         spec = self.references
-        if references and (spec is None or len(references) > len(spec["inputs"])):
-            raise WorkflowError("workflow does not support this number of references")
+        self.validate_reference_count(len(references))
         if spec is not None:
             inputs = graph[spec["generator"]]["inputs"]
             for name in spec["inputs"]:
@@ -304,6 +317,9 @@ class Workflow:
                     or any(not isinstance(s, str) or not s for s in slots)
                     or len(set(slots)) != len(slots) or generator == loader):
                 raise WorkflowError("invalid reference inputs")
+            minimum = references.get("minItems", 0)
+            if type(minimum) is not int or not 0 <= minimum <= len(slots):
+                raise WorkflowError("invalid minimum reference count")
             _inputs(graph, generator)  # Optional sockets need not appear in an API export.
             loader_inputs = _inputs(graph, loader)
             if (graph[loader].get("class_type") != "HeltoLoadImageFromRoot"

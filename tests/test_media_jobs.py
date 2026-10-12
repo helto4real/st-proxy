@@ -424,7 +424,7 @@ class MediaJobsTests(unittest.IsolatedAsyncioTestCase):
         waiting.cancel()
         await asyncio.gather(waiting, return_exceptions=True)
         for index in range(2):
-            await wait_until(lambda index=index: len(self.comfy.prompt_calls) == index + 1)
+            await wait_until(lambda index=index: len(self.comfy.prompt_calls) >= index + 1)
             self.comfy.completion[self.comfy.prompt_calls[index]].set()
         result = await self.jobs.get_job("batch")
         self.assertEqual(result["status"], "partial")

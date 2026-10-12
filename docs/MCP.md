@@ -327,6 +327,114 @@ environment overrides consistently for both st-proxy and Pi. Launch a new Pi
 sandbox session to pick up mounts; a broker restart loads new workflows and tools.
 This implementation does not restart either service automatically.
 
+## Variants of a saved result
+
+A result from `image_generation` can become the reference for `qwen_scene`, even
+when the original was generated without references. The selected result is the
+only reference for this flow; no original prompt or earlier references are needed.
+
+Resolve the user's selection (for example, "image two") to its absolute `path`
+from an earlier tool result. Ask if the selection is ambiguous; do not search the
+output directory. Read `describe_workflow("qwen_scene")` and its `prompt_guidance`
+unless already available in the conversation. Register the selected file once:
+
+```json
+{
+  "workflow_id": "qwen_scene",
+  "path": "/run/media/veracrypt1/mcp-images/RESULT_DIRECTORY/0.png"
+}
+```
+
+These are `register_image` arguments. Replace the example path with the actual
+result path. A saved path is not an `image_id`: use the ID returned by registration
+in the following `generate_batch` call. An already registered, valid ID for this
+same image and `qwen_scene` can be reused.
+
+```json
+{
+  "job_id": "variants-unique-id",
+  "workflow_id": "qwen_scene",
+  "items": [
+    {
+      "parameters": {
+        "prompt": "The scene from <image1> in soft morning light. Preserve the same people, their identities, clothing, poses, objects, environment, framing and composition. Low sunlight from the left casts long, gentle shadows while the background remains softly illuminated.",
+        "aspect_ratio": "16:9",
+        "max_side": 1600
+      },
+      "references": ["REGISTERED_IMAGE_ID"]
+    },
+    {
+      "parameters": {
+        "prompt": "The scene from <image1> in warm evening light. Preserve the same people, their identities, clothing, poses, objects, environment, framing and composition. Golden light from the right creates warm highlights and soft, deep shadows across the unchanged scene.",
+        "aspect_ratio": "16:9",
+        "max_side": 1600
+      },
+      "references": ["REGISTERED_IMAGE_ID"]
+    }
+  ]
+}
+```
+
+Compose each full prompt using the workflow's guidance for editing an existing
+image: change the requested attributes and preserve untargeted content. The
+example illustrates the call structure; adapt the prompts to the user's request.
+Use the user's description or actual inspection by a vision-capable model; do not
+invent observed details. Reference fidelity is not an exact-copy guarantee.
+
+Prepare every prompt before the call. Every item uses the same source as
+`<image1>`, never the output of another item. The user's format and size choices
+take precedence; otherwise reuse known format parameters from the selected
+result, or use workflow defaults when unknown. Use `standard` normally and
+`quick draft` for requested previews or speed, respecting explicit user choices.
+Vary the prompts; this flow adds no seed control or automatic seed changes.
+
+Existing limits apply: 12,000 characters per prompt, 10 MiB per reference before
+and after normalization, and the configured batch queue limit. Registration
+errors must be resolved before generation; oversized references are not silently
+resized. After proxy restart, register the saved image again.
+
+Present variant descriptions and paths in request order (batch indices are
+zero-based). Recover timeouts with `get_job` and the same job ID; retain successful
+items in a partial batch and report failures without automatically regenerating.
+
+## Upscale a saved image
+
+`image_upscale` uses `image_upscale.json` with exactly one registered reference.
+Its only parameter is `max_side`: default 3200, range 256–3200, multiples of 32.
+The input image determines the aspect ratio; the output never exceeds max side.
+There is no prompt or mode parameter. The stored encrypted prompt, Euler sampler,
+manual sigmas, model, LoRA and color/tone settings remain workflow-owned.
+
+Register the explicitly selected image with this workflow (IDs from `qwen_scene`
+are not interchangeable):
+
+```json
+{"workflow_id": "image_upscale", "path": "/run/media/veracrypt1/mcp-images/selected.png"}
+```
+
+Use the returned ID in `generate`:
+
+```json
+{
+  "job_id": "upscale-unique-id",
+  "workflow_id": "image_upscale",
+  "parameters": {"max_side": 3200},
+  "references": ["RETURNED_IMAGE_ID"]
+}
+```
+
+`parameters: {}` selects the default size. For multiple images, use
+`generate_batch` with `{parameters, references}` per item, each containing its
+selected input ID. Missing or excess references reject the entire request before
+queueing. Existing reference size/path limits, GPU reservation, saved-file
+results and job-ID recovery apply; the source image is untouched.
+
+The manifest maps max side to node 1, reference `image 1` using loader template 6,
+and Helto output to node 2. Generic `references.minItems` defaults to 0 for
+existing workflows and is 1 here; the maximum comes from the number of mapped
+reference slots. `describe_workflow` reports these bounds. Restart the proxy to
+load the new manifest. The existing generation mode YAML is not used for upscale.
+
 ## Outputs
 
 `comfy_images` reads standard `images` records from the selected node's history

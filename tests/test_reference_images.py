@@ -196,6 +196,90 @@ class ReferenceJobsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(batch.structured_content['status'], 'succeeded')
             self.assertEqual(self.llm.admin_calls, ['unload_model'])
 
+    async def test_text_to_image_result_becomes_shared_variant_reference_over_mcp(self):
+        # Keep the text-only workflow distinct from the reference-capable workflow.
+        directory = self.directory / 'text-workflow'
+        graph, manifest = write_catalog(directory)
+        graph['3'] = copy.deepcopy(self.jobs.catalog.get('example').graph['3'])
+        (directory / 'workflow.json').write_text(json.dumps(graph))
+        manifest['id'] = 'image_generation'
+        self.jobs.catalog.workflows['image_generation'] = Workflow.load(manifest, directory, 100000)
+        scene = self.jobs.catalog.get('example')
+        self.jobs.catalog.workflows['qwen_scene'] = replace(
+            scene, manifest={**scene.manifest, 'id': 'qwen_scene'},
+        )
+        png = image_bytes()
+        (self.comfy.source / 'image.png').write_bytes(png)
+        async with self.sdk_client() as client:
+            generated = await client.call_tool('generate', {
+                'job_id': 'original', 'workflow_id': 'image_generation',
+                'parameters': {'prompt': 'A red apple on a table.'},
+            })
+            self.assertFalse(generated.is_error, generated)
+            original = generated.structured_content
+            self.assertEqual(original['status'], 'succeeded')
+            self.assertNotIn('image 1', self.comfy.submissions[0]['prompt']['1']['inputs'])
+            path = Path(original['images'][0]['path'])
+            self.assertEqual(path.read_bytes(), png)
+            self.assertNotIn('image_id', original['images'][0])
+            admin_before = self.llm.admin_calls.copy()
+            free_before = self.comfy.free_calls
+            registered = await client.call_tool('register_image', {
+                'workflow_id': 'qwen_scene', 'path': str(path),
+            })
+            self.assertFalse(registered.is_error, registered)
+            reference = registered.structured_content
+            self.assertEqual(path.read_bytes(), png)
+            self.assertEqual(len(self.store_calls), 1)
+            self.assertEqual(len(self.comfy.submissions), 1)
+            self.assertEqual(self.llm.admin_calls, admin_before)
+            self.assertEqual(self.comfy.free_calls, free_before)
+            prompts = [f'The same apple and composition from <image1> in {light} light.'
+                       for light in ('morning', 'evening', 'overcast')]
+            request = {
+                'job_id': 'variants', 'workflow_id': 'qwen_scene',
+                'items': [{'parameters': {'prompt': prompt}, 'references': [reference['image_id']]}
+                          for prompt in prompts],
+            }
+            image_batch = self.jobs.coordinator.image_batch
+
+            def reserve(bodies):
+                self.assertEqual(len(bodies), len(prompts))
+                return image_batch(bodies)
+
+            with patch.object(self.jobs.coordinator, 'image_batch',
+                              side_effect=reserve) as reservation:
+                response = await client.call_tool('generate_batch', request)
+                reservation.assert_called_once()
+            self.assertFalse(response.is_error, response)
+            batch = response.structured_content
+            self.assertEqual(batch['status'], 'succeeded')
+            self.assertEqual([item['index'] for item in batch['items']], [0, 1, 2])
+            paths = [Path(item['images'][0]['path']) for item in batch['items']]
+            self.assertEqual(len(set(paths)), len(prompts))
+            for output, submission, prompt in zip(paths, self.comfy.submissions[1:],
+                                                   prompts, strict=True):
+                self.assertEqual(output.read_bytes(), png)
+                graph = submission['prompt']
+                inputs = graph['1']['inputs']
+                self.assertEqual(inputs['positive_prompt'], prompt)
+                loader = graph[inputs['image 1'][0]]
+                self.assertEqual(loader['class_type'], 'HeltoLoadImageFromRoot')
+                self.assertEqual(loader['inputs']['root'], str(self.jobs.output_dir))
+                self.assertEqual(loader['inputs']['subfolder'], 'references')
+                self.assertEqual(loader['inputs']['filename'], Path(reference['preview_path']).name)
+                self.assertTrue(all(f'image {i}' not in inputs for i in range(2, 11)))
+                self.assertEqual(graph['unmapped'], scene.graph['unmapped'])
+            recovered = await client.call_tool('get_job', {'job_id': 'variants'})
+            self.assertEqual(recovered.structured_content, batch)
+            repeated = await client.call_tool('generate_batch', request)
+            self.assertEqual(repeated.structured_content, batch)
+            self.assertEqual(len(self.comfy.submissions), 1 + len(prompts))
+            self.assertEqual(len(self.store_calls), 1)
+            self.assertEqual(self.llm.admin_calls, ['unload_model'])
+            self.assertEqual(self.comfy.free_calls, free_before)
+            self.assertEqual(path.read_bytes(), png)
+
     async def test_batch_order_content_identity_partial_results_and_retry(self):
         first = await self.register()
         second_path = self.inputs / 'blue.webp'

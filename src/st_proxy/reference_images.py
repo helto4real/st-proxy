@@ -156,10 +156,10 @@ class ReferenceImages:
                 "mime_type": "image/png", "preview_path": str(image.path)}
 
     async def resolve(self, workflow: Workflow, ids: list[str]) -> list[ReferenceImage]:
-        maximum = len(workflow.references["inputs"]) if workflow.references else 0
-        if (not isinstance(ids, list) or len(ids) > maximum
+        if (not isinstance(ids, list)
                 or any(not isinstance(i, str) for i in ids)):
-            raise WorkflowError("invalid reference list or too many references for this workflow")
+            raise WorkflowError("invalid reference list for this workflow")
+        workflow.validate_reference_count(len(ids))
         result = []
         for image_id in ids:
             image = self.images.get(image_id)
