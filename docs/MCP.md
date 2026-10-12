@@ -400,7 +400,7 @@ items in a partial batch and report failures without automatically regenerating.
 ## Upscale a saved image
 
 `image_upscale` uses `image_upscale.json` with exactly one registered reference.
-Its only parameter is `max_side`: default 3200, range 256–3200, multiples of 32.
+Its only parameter is `max_side`: default 3200, range 256–4096, multiples of 32.
 The input image determines the aspect ratio; the output never exceeds max side.
 There is no prompt or mode parameter. The stored encrypted prompt, Euler sampler,
 manual sigmas, model, LoRA and color/tone settings remain workflow-owned.

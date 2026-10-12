@@ -42,17 +42,18 @@ def test_shipped_upscale_contract_preserves_the_export():
     assert workflow.normalize({}) == {'max_side': 3200}
     description = workflow.describe()
     assert set(description['parameters']['properties']) == {'max_side'}
+    assert description['parameters']['properties']['max_side']['maximum'] == 4096
     assert description['references']['minItems'] == description['references']['maxItems'] == 1
     assert 'without references' not in description['references']['description']
     assert 'prompt_guidance' not in description
     reference = {'root': '/synthetic/input', 'subfolder': 'references', 'filename': 'input.png'}
     expected = copy.deepcopy(original)
-    expected['1']['inputs']['max side'] = 3072
+    expected['1']['inputs']['max side'] = 4096
     expected['1']['inputs']['image 1'] = ['mcp_reference_1', 0]
     expected['mcp_reference_1'] = copy.deepcopy(original['6'])
     expected['mcp_reference_1']['inputs'].update(reference)
     expected['2']['inputs']['reference_only'] = True
-    assert workflow.build(workflow.normalize({'max_side': 3072}), [reference]) == expected
+    assert workflow.build(workflow.normalize({'max_side': 4096}), [reference]) == expected
     assert workflow.graph == original
     assert WorkflowCatalog(str(ROOT), 100000).get('qwen_scene').describe()['references'][
         'minItems'] == 0
@@ -67,7 +68,7 @@ def test_invalid_reference_minimum_is_rejected(tmp_path, minimum):
 
 
 @pytest.mark.parametrize('parameters', [
-    {'max_side': 255}, {'max_side': 3232}, {'max_side': 1000}, {'max_side': True},
+    {'max_side': 255}, {'max_side': 4128}, {'max_side': 1000}, {'max_side': True},
     {'prompt': 'replace'}, {'mode': 'standard'}, {'aspect_ratio': '16:9'},
 ])
 def test_upscale_only_accepts_bounded_max_side(tmp_path, parameters):
@@ -149,11 +150,18 @@ class UpscaleMCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(recovered.structured_content, result)
             self.assertEqual(repeated.structured_content, result)
             self.assertEqual(len(self.comfy.submissions), 1)
+            maximum = await client.call_tool('generate', {
+                **request, 'job_id': 'upscale-maximum', 'parameters': {'max_side': 4096},
+            })
+            self.assertFalse(maximum.is_error, maximum)
+            self.assertEqual(maximum.structured_content['parameters'], {'max_side': 4096})
+            expected['1']['inputs']['max side'] = 4096
+            self.assertEqual(self.comfy.submissions[1]['prompt'], expected)
             self.comfy.fail_next_job = True
             batch_request = {'job_id': 'upscale-batch', 'workflow_id': 'image_upscale',
                              'items': [{'parameters': {'max_side': size},
                                         'references': [reference['image_id']]}
-                                       for size in (2560, 3072)]}
+                                       for size in (2560, 4096)]}
             with patch.object(self.jobs.coordinator, 'image_batch',
                               wraps=self.jobs.coordinator.image_batch) as reservation:
                 batch = await client.call_tool('generate_batch', batch_request)
@@ -162,7 +170,7 @@ class UpscaleMCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(batch.structured_content['status'], 'partial')
             self.assertEqual([i['status'] for i in batch.structured_content['items']],
                              ['failed', 'succeeded'])
-            for submission, size in zip(self.comfy.submissions[1:], (2560, 3072), strict=True):
+            for submission, size in zip(self.comfy.submissions[2:], (2560, 4096), strict=True):
                 sent = submission['prompt']
                 self.assertEqual(sent['1']['inputs']['max side'], size)
                 self.assertEqual(sent['1']['inputs']['positive_prompt'],
@@ -174,7 +182,7 @@ class UpscaleMCPTests(unittest.IsolatedAsyncioTestCase):
             })).structured_content, batch.structured_content)
             self.assertEqual((await client.call_tool('generate_batch', batch_request)
                               ).structured_content, batch.structured_content)
-            self.assertEqual(len(self.comfy.submissions), 3)
+            self.assertEqual(len(self.comfy.submissions), 4)
             self.assertEqual(self.llm.admin_calls, ['unload_model'])
             self.assertEqual(self.comfy.free_calls, 0)
             self.assertEqual(self.source.read_bytes(), original_bytes)

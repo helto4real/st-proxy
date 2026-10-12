@@ -9,7 +9,7 @@
       "description": "Maximum longest output edge in pixels; must be a multiple of 32.",
       "default": 3200,
       "minimum": 256,
-      "maximum": 3200,
+      "maximum": 4096,
       "multipleOf": 32,
       "target": {
         "node": "1",
