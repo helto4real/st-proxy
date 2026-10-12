@@ -64,6 +64,9 @@ class McpListener:
             "Generate images using approved workflows. Before composing prompts, call "
             "describe_workflow for the chosen workflow and apply any prompt_guidance to "
             "parameters.prompt, then call the generation tool. "
+            "Set parameters.nsfw=true only if exposed and explicitly requested by the user "
+            "for this image or batch. Never infer it from prompts, references or earlier jobs. "
+            "Omitting nsfw leaves it false; it is independent of draft/standard mode. "
             "When multiple images are needed, prefer "
             "generate_batch: it is the most efficient way to avoid repeated GPU switching and "
             "slow LLM reloads. Prepare all prompts before calling it. "
@@ -98,6 +101,7 @@ class McpListener:
             """Get parameters, available modes, reference limits and optional prompt_guidance.
 
             No GPU acquisition. Select parameters.mode from its enum when available.
+            Set parameters.nsfw=true only for an explicit user request for this image or batch.
             Apply guidance when writing parameters.prompt, then call generate or generate_batch.
             """
             try:
@@ -128,6 +132,7 @@ class McpListener:
 
             Optional references are registered image IDs ordered as <image1>, <image2>, etc.
             Choose parameters.mode from describe_workflow, or omit it for the configured default.
+            If exposed, nsfw defaults to false; set true only when the user explicitly requests it.
             Reuse job_id to recover a lost response.
             """
             try:
@@ -147,6 +152,9 @@ class McpListener:
             per item. Reference order maps to <image1>, <image2>, etc. for that item.
             Each item may select its own mode from describe_workflow via parameters.mode
             (or mode directly in a flat item); omitting it uses the configured default.
+            Each item also has its own nsfw flag when exposed, default false. Set true only
+            when the user explicitly requests NSFW for that image or this batch; never infer
+            it from content or earlier jobs. It is independent of parameters.mode.
             Items run consecutively in FIFO order, within the configured image queue limit
             (32 by default). All parameters are validated before anything is queued.
             Results have zero-based item indices, individual status and saved image paths;

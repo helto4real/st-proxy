@@ -120,9 +120,11 @@ class WorkflowModes:
         return cls(data["default"], data["modes"])
 
     def validate_targets(self, graph: dict, parameters: dict, outputs: list,
-                         references: dict | None) -> None:
+                         references: dict | None,
+                         controlled_inputs: set[tuple[str, str]] | None = None) -> None:
         mapped = {(spec["target"]["node"], spec["target"]["input"])
                   for spec in parameters.values()}
+        mapped.update(controlled_inputs or ())
         protected_nodes = {output["node"] for output in outputs}
         if references:
             protected_nodes.add(references["loader"])

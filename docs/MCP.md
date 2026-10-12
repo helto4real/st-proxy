@@ -117,7 +117,7 @@ to take effect. There is no per-request file reading or hot reload.
 Quick draft keeps the API export's values: 8 steps, cfg 1, `res_multistep`,
 `simple`, and `qwen_image_2.1_turbo_bf16.safetensors`. Standard uses 40 steps,
 cfg 2.5, `er_sde`, `beta`, and `qwen_image_2.1_int8_convrot.safetensors`.
-Both profiles retain the **disabled** LoRA at strength 1. Quick draft keeps
+Both profiles retain the NSFW LoRA **disabled by default**, at strength 1. Quick draft keeps
 `sigmas: ["13", 0]` and exposes node 13's sigma list in YAML. Standard removes
 node 1's `sigmas` input. The disconnected ManualSigmas node remains in the graph.
 
@@ -165,7 +165,7 @@ modes:
 
 Use quoted node IDs and the API export's exact input names (including
 `diffusion_model`). `set` replaces entire input values, including LoRA objects;
-it does not merge their fields. To add a LoRA, explicitly add `lora_2` under
+it does not merge their fields. To add a mode-owned LoRA, explicitly add `lora_3` under
 node `"11"`, with its complete `on`, `lora`, and `strength` values. Unlisted inputs
 retain their export values. `remove` removes only the named inputs from the job
 copy; removing an already absent input is harmless. Each mode starts from a
@@ -200,6 +200,51 @@ The resolved mode appears in public result parameters and job identity. Omitted
 mode and explicit default are equivalent for retries; changing a mode under an
 existing job ID returns a conflict. Restarting clears the existing in-memory job
 registry as before.
+
+## Explicit NSFW LoRAs
+
+`image_generation` and `qwen_scene` expose `nsfw`, a boolean defaulting to `false`,
+independent of `mode`. Set it to `true` only when the user explicitly requests
+NSFW for the current image or batch. Never infer it from prompts, reference
+images or earlier jobs. This toggles the configured LoRAs; it does not rewrite
+the prompt or classify the generated image's content. The server enforces the
+boolean/default contract; the agent must follow the user's activation instruction.
+
+For a single `generate` call:
+
+```json
+{
+  "job_id": "nsfw-single-unique-id",
+  "workflow_id": "image_generation",
+  "parameters": {"prompt": "USER_REQUESTED_SCENE", "mode": "standard", "nsfw": true}
+}
+```
+
+For `generate_batch`, select the flag separately in every item. Both forms work:
+
+```json
+{
+  "job_id": "nsfw-batch-unique-id",
+  "workflow_id": "qwen_scene",
+  "items": [
+    {"prompt": "USER_REQUESTED_SCENE", "mode": "quick draft", "nsfw": true},
+    {"parameters": {"prompt": "ANOTHER_SCENE", "nsfw": false}, "references": []}
+  ]
+}
+```
+
+Each workflow manifest declares `"nsfw_loras": {"node": "11", "inputs": ["lora_2"]}`.
+The selected AIO LoRA rows keep their exported filenames and strengths. After
+applying the generation mode, the job copy sets their `on` values from `nsfw`;
+omitting the flag always disables them, even if an export has them enabled.
+Other LoRA rows remain unchanged. Mapped parameters and modes cannot replace or
+remove these controlled rows. Missing or invalid targets disable the affected
+workflow at startup; workflows without this declaration do not gain a flag.
+
+All batch flags are validated before queueing. The resolved flag appears in
+result parameters and retry identity: omitted and explicit `false` are equivalent,
+while changing it under an existing job ID returns a conflict. No activation is
+remembered between jobs. Restart the proxy to load the updated manifests.
 
 ## Reference scenes and prompt guidance
 

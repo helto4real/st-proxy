@@ -105,6 +105,9 @@ def test_image_manifest_maps_sizes_and_preserves_other_inputs(tmp_path):
     manifest_path = Path(__file__).resolve().parents[1] / "workflows/image_generation.manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["workflow"] = "workflow.json"
+    shipped = json.loads((manifest_path.parent / "image_generation.json").read_text())
+    graph["11"]["inputs"]["lora_2"] = shipped["11"]["inputs"]["lora_2"]
+    (tmp_path / "workflow.json").write_text(json.dumps(graph))
     guidance = tmp_path / manifest["prompt_guidance"]
     guidance.parent.mkdir(parents=True)
     guidance.write_bytes((manifest_path.parent / manifest["prompt_guidance"]).read_bytes())
@@ -114,6 +117,7 @@ def test_image_manifest_maps_sizes_and_preserves_other_inputs(tmp_path):
     workflow = Workflow.load(manifest, tmp_path, 100000)
     assert workflow.normalize({"prompt": "test"}) == {
         "prompt": "test", "aspect_ratio": "16:9", "max_side": 1600, "mode": "standard",
+        "nsfw": False,
     }
     values = workflow.normalize({"prompt": "test", "aspect_ratio": "9:16", "max_side": 1536,
                                  "mode": "quick draft"})
@@ -122,9 +126,7 @@ def test_image_manifest_maps_sizes_and_preserves_other_inputs(tmp_path):
         "positive_prompt": "test", "aspect ratio": "9:16", "max side": 1536,
     })
     expected["3"]["inputs"]["reference_only"] = True
-    shipped = json.loads((manifest_path.parent / "image_generation.json").read_text())
     expected["1"]["inputs"]["diffusion_model"] = shipped["1"]["inputs"]["diffusion_model"]
-    expected["11"]["inputs"]["lora_1"] = shipped["11"]["inputs"]["lora_1"]
     assert workflow.build(values) == expected
     schema = workflow.describe()["parameters"]["properties"]
     assert schema["max_side"]["multipleOf"] == 32

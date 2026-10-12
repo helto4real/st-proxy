@@ -79,14 +79,26 @@ class Workflow:
         return self.manifest.get("references")
 
     @property
+    def nsfw_loras(self) -> dict[str, Any] | None:
+        return self.manifest.get("nsfw_loras")
+
+    @property
     def id(self) -> str:
         return self.manifest["id"]
 
     @property
     def parameters(self) -> dict[str, Any]:
+        parameters = dict(self.manifest["parameters"])
         if self.modes is not None:
-            return {**self.manifest["parameters"], "mode": self.modes.parameter()}
-        return self.manifest["parameters"]
+            parameters["mode"] = self.modes.parameter()
+        if self.nsfw_loras is not None:
+            parameters["nsfw"] = {
+                "type": "boolean", "default": False,
+                "description": "Enable the configured NSFW LoRAs only when the user explicitly "
+                               "requests NSFW for this image or batch. Never infer this from "
+                               "the prompt, references or earlier jobs. Independent of mode.",
+            }
+        return parameters
 
     @property
     def outputs(self) -> list[dict[str, str]]:
@@ -139,6 +151,12 @@ class Workflow:
                 self.modes.apply(graph, values.get("mode", self.modes.default))
             except ModeError as exc:
                 raise WorkflowError(str(exc)) from None
+        if self.nsfw_loras is not None:
+            enabled = values.get("nsfw", False)
+            if type(enabled) is not bool:
+                raise WorkflowError("nsfw: parameter has the wrong type")
+            for name in self.nsfw_loras["inputs"]:
+                graph[self.nsfw_loras["node"]]["inputs"][name]["on"] = enabled
         references = references or []
         spec = self.references
         if references and (spec is None or len(references) > len(spec["inputs"])):
@@ -157,6 +175,8 @@ class Workflow:
                 inputs[spec["inputs"][index]] = [node_id, 0]
         for name, value in values.items():
             if name == "mode" and self.modes is not None:
+                continue
+            if name == "nsfw" and self.nsfw_loras is not None:
                 continue
             target = self.parameters[name]["target"]
             graph[target["node"]]["inputs"][target["input"]] = value
@@ -182,7 +202,30 @@ class Workflow:
         parameters, outputs = manifest.get("parameters"), manifest.get("outputs")
         if not isinstance(parameters, dict) or not isinstance(outputs, list) or not outputs:
             raise WorkflowError("manifest needs parameters and outputs")
-        mapped = set()
+        nsfw_loras = manifest.get("nsfw_loras")
+        controlled_inputs = set()
+        if "nsfw_loras" in manifest:
+            if "nsfw" in parameters:
+                raise WorkflowError("nsfw is reserved when NSFW LoRAs are configured")
+            if (not isinstance(nsfw_loras, dict) or nsfw_loras.keys() != {"node", "inputs"}
+                    or not isinstance(nsfw_loras["node"], str)
+                    or not isinstance(nsfw_loras["inputs"], list) or not nsfw_loras["inputs"]
+                    or any(not isinstance(name, str) or not name.startswith("lora_")
+                           or not name[5:].isdigit() for name in nsfw_loras["inputs"])
+                    or len(set(nsfw_loras["inputs"])) != len(nsfw_loras["inputs"])):
+                raise WorkflowError("invalid NSFW LoRA targets")
+            node = nsfw_loras["node"]
+            inputs = _inputs(graph, node)
+            if graph[node].get("class_type") != "AIOLoraConfiguration":
+                raise WorkflowError("NSFW LoRAs require AIOLoraConfiguration")
+            for name in nsfw_loras["inputs"]:
+                row = inputs.get(name)
+                if (not isinstance(row, dict) or type(row.get("on")) is not bool
+                        or not isinstance(row.get("lora"), str)
+                        or not row["lora"].strip() or row["lora"] == "None"):
+                    raise WorkflowError("configured NSFW LoRA row is missing or invalid")
+                controlled_inputs.add((node, name))
+        mapped = set(controlled_inputs)
         for name, spec in parameters.items():
             if (not isinstance(name, str) or not name or not isinstance(spec, dict)
                     or spec.keys() - PARAMETER_KEYS or spec.get("type") not in TYPES):
@@ -226,6 +269,8 @@ class Workflow:
             if target["input"] not in _inputs(graph, target["node"]):
                 raise WorkflowError("configured input is missing")
             pair = (target["node"], target["input"])
+            if pair in controlled_inputs:
+                raise WorkflowError("parameter conflicts with NSFW LoRA controls")
             if pair in mapped:
                 raise WorkflowError("parameters cannot target the same input")
             mapped.add(pair)
@@ -286,7 +331,7 @@ class Workflow:
                 raise WorkflowError("mode is reserved when a modes file is configured")
             try:
                 modes = (mode_files or ModeFiles()).load(manifest["modes"], directory, max_bytes)
-                modes.validate_targets(graph, parameters, outputs, references)
+                modes.validate_targets(graph, parameters, outputs, references, controlled_inputs)
             except ModeError as exc:
                 raise WorkflowError(str(exc)) from None
         return cls(copy.deepcopy(manifest), graph, roots, guidance, modes)

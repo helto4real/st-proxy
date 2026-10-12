@@ -4,6 +4,7 @@
   "description": "Compose a scene from text and up to ten ordered reference images. Read prompt_guidance before writing the scene prompt.",
   "workflow": "qwen_scene.json",
   "modes": "modes/qwen-image.yaml",
+  "nsfw_loras": {"node": "11", "inputs": ["lora_2"]},
   "parameters": {
     "prompt": {
       "type": "string",
