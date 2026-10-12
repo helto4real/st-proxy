@@ -43,7 +43,8 @@ The supplied `workflows/image_generation.manifest.json` references
 uses node `3` for Helto output. Max side accepts 256–3200 pixels in steps of 32,
 matching the export's sizing controls. The virtual `mode` parameter defaults to
 `standard`; its operator-owned YAML controls the model, sampling and LoRAs described
-below. Remaining settings, including seed, come from the unchanged API export.
+below. Seed is random per image unless explicitly supplied; other unmapped settings
+come from the unchanged API export.
 
 For text-to-image, `describe_workflow("image_generation")` returns
 `prompts/prompt-enhance-scene.md` verbatim as `prompt_guidance`. The agent reads it
@@ -96,7 +97,10 @@ unchanged. Adding nodes does not require a manifest update. ComfyUI still
 performs its own runtime validation.
 
 Parameter types: `string`, `integer`, `number`, `boolean`. Constraints: `enum`,
-`minimum`, `maximum`, `minLength`, `maxLength`. Optional parameters need a `default`.
+`minimum`, `maximum`, `minLength`, `maxLength`. Optional parameters need a `default`,
+except `seed` may use `random_default: true` with integer minimum/maximum bounds
+within 0–9007199254740991. This requires an optional public integer seed without
+`default`, `enum` or `multipleOf`. Other optional parameters retain their default rule.
 Integer parameters can also specify a positive integer `multipleOf` step.
 Private parameters are required and cannot have defaults. Unknown agent
 parameters are rejected. Unspecified string length is limited to 65,536 characters.
@@ -106,6 +110,30 @@ the value sent to ComfyUI. Like Dreamchat, st-proxy writes prompt text directly
 into the mapped input and submits the workflow to `/prompt`. No separate prompt
 encryption request or Helto privacy token is needed. Unmapped values, including
 encrypted negative prompts and privacy settings, remain unchanged in the export.
+
+## Image seeds
+
+`image_generation`, `qwen_scene` and `image_upscale` expose optional integer `seed`,
+from 0 through 9007199254740991. Omit it for a random seed selected separately for
+each image. An explicit value, including zero, is fixed. Draft/standard and NSFW
+remain independent of seed. The API exports are not modified.
+
+For a fixed seed, add it to the single call's parameters or each selected batch item:
+
+```json
+{"prompt": "USER_REQUESTED_SCENE", "seed": 12345}
+```
+
+Use the same field with `max_side` for upscale. Batches may mix omitted and explicit
+seeds; repeated explicit seeds are allowed. Every result's public `parameters.seed`
+contains the resolved seed, including for failed items and partial batches.
+
+Seeds are chosen only for a new job, after request validation and capacity checks.
+Repeat the original arguments with the same job ID, or call `get_job`, to recover
+without new seeds or submissions. Adding an explicit seed to an existing random
+request is a different request and returns a conflict. To reproduce a returned seed,
+use it explicitly with a new job ID and the same prompt, references and settings.
+Job state remains process-local and is cleared by proxy restart.
 
 ## YAML generation modes
 
@@ -386,7 +414,7 @@ Prepare every prompt before the call. Every item uses the same source as
 take precedence; otherwise reuse known format parameters from the selected
 result, or use workflow defaults when unknown. Use `standard` normally and
 `quick draft` for requested previews or speed, respecting explicit user choices.
-Vary the prompts; this flow adds no seed control or automatic seed changes.
+Omit seed for fresh random variants, or set an explicit seed per item for controlled comparisons.
 
 Existing limits apply: 12,000 characters per prompt, 10 MiB per reference before
 and after normalization, and the configured batch queue limit. Registration
@@ -400,7 +428,8 @@ items in a partial batch and report failures without automatically regenerating.
 ## Upscale a saved image
 
 `image_upscale` uses `image_upscale.json` with exactly one registered reference.
-Its only parameter is `max_side`: default 3200, range 256–4096, multiples of 32.
+It exposes `max_side` (default 3200, range 256–4096, multiples of 32) and optional
+`seed` (random when omitted, fixed when supplied).
 The input image determines the aspect ratio; the output never exceeds max side.
 There is no prompt or mode parameter. The stored encrypted prompt, Euler sampler,
 manual sigmas, model, LoRA and color/tone settings remain workflow-owned.
@@ -497,8 +526,8 @@ Each item uses the workflow's normal mappings and defaults. No graph validation
 is added for unmapped nodes. All parameters and queue capacity are checked before
 any item is enqueued; admission is all or none. The batch must be non-empty and
 fit the existing queue count and byte limits (32 workflow executions by default).
-Seed is not changed implicitly: repeating identical parameters can produce the
-same image. Different seeds require a configured seed mapping.
+For the supplied workflows, omitted seeds are random per item; explicit seeds are
+fixed and returned in result parameters. Other workflows retain their configured defaults.
 
 Batch results contain ordered `items` with zero-based `index`, public parameters,
 status, images and any error. Each result is saved as soon as its generation

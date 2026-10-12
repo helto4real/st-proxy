@@ -64,7 +64,9 @@ class McpListener:
             "Generate or upscale images using approved workflows. First call "
             "describe_workflow for the chosen workflow. If its schema exposes prompt, apply "
             "any prompt_guidance to parameters.prompt. Otherwise use the stored workflow prompt. "
-            "For image_upscale, register exactly one image and pass only optional max_side. "
+            "For image_upscale, register exactly one image and pass optional max_side and seed. "
+            "For workflows with random seed defaults, omit seed for a fresh seed per image "
+            "or provide an integer for a fixed seed. Results contain the resolved seed. "
             "Set parameters.nsfw=true only if exposed and explicitly requested by the user "
             "for this image or batch. Never infer it from prompts, references or earlier jobs. "
             "Omitting nsfw leaves it false; it is independent of draft/standard mode. "
@@ -139,9 +141,11 @@ class McpListener:
             Prefer generate_batch for multiple images.
 
             References are registered image IDs; required counts come from describe_workflow.
-            image_upscale requires one reference, no prompt, and optional max_side.
+            image_upscale requires one reference, no prompt, and optional max_side and seed.
             Choose parameters.mode from describe_workflow, or omit it for the configured default.
             If exposed, nsfw defaults to false; set true only when the user explicitly requests it.
+            Omit seed for a random default where described, or supply a fixed integer.
+            The resolved seed is returned in parameters and retained on job-ID retries.
             Reuse job_id to recover a lost response.
             """
             try:
@@ -159,7 +163,7 @@ class McpListener:
             [{"prompt": "a forest"}, {"prompt": "a lake", "aspect_ratio": "16:9"}].
             With references, use {"parameters": {"prompt": "..."}, "references": ["image_id"]}
             per item. For image_upscale use {"parameters": {"max_side": 3200},
-            "references": ["image_id"]}; parameters may be empty for the default size.
+            "references": ["image_id"]}; parameters may be empty for default size/random seed.
             Reference order maps to <image1>, <image2>, etc. for that item.
             For variants of one saved image, use qwen_scene and the same registered ID
             as the sole reference in every item (<image1>). Write each complete prompt
@@ -174,7 +178,8 @@ class McpListener:
             (32 by default). All parameters are validated before anything is queued.
             Results have zero-based item indices, individual status and saved image paths;
             successful items are retained if others fail. Defaults, including seed, are
-            unchanged: repeated identical parameters may produce identical images.
+            controlled by the workflow schema. Random-default seeds are chosen separately
+            per item; explicit seeds remain fixed. Results include each resolved seed.
             Wait for the whole batch. After timeout use get_job with the same job_id;
             never resubmit successful items under a new ID.
             """

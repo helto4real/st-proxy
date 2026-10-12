@@ -120,7 +120,7 @@ def test_image_manifest_maps_sizes_and_preserves_other_inputs(tmp_path):
         "nsfw": False,
     }
     values = workflow.normalize({"prompt": "test", "aspect_ratio": "9:16", "max_side": 1536,
-                                 "mode": "quick draft"})
+                                 "mode": "quick draft", "seed": graph["1"]["inputs"]["seed"]})
     expected = copy.deepcopy(graph)
     expected["1"]["inputs"].update({
         "positive_prompt": "test", "aspect ratio": "9:16", "max side": 1536,

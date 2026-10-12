@@ -5,6 +5,7 @@ import copy
 import json
 import logging
 import math
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,8 +16,9 @@ from .workflow_modes import ModeError, ModeFiles, WorkflowModes
 LOG = logging.getLogger(__name__)
 SCHEMA_KEYS = {"type", "description", "default", "enum", "minimum", "maximum",
                "minLength", "maxLength", "multipleOf"}
-PARAMETER_KEYS = SCHEMA_KEYS | {"target", "required", "private"}
+PARAMETER_KEYS = SCHEMA_KEYS | {"target", "required", "private", "random_default"}
 TYPES = {"string": (str,), "integer": (int,), "number": (int, float), "boolean": (bool,)}
+MAX_SEED = 9007199254740991
 
 
 class WorkflowError(ValueError):
@@ -148,6 +150,8 @@ class Workflow:
                 value = parameters[name]
             elif spec.get("required", False):
                 raise WorkflowError(f"missing required parameter: {name}")
+            elif spec.get("random_default", False):
+                continue
             else:
                 value = spec["default"]
             try:
@@ -157,8 +161,17 @@ class Workflow:
             result[name] = value
         return result
 
+    def resolve_seed(self, values: dict[str, Any]) -> None:
+        spec = self.parameters.get("seed", {})
+        if spec.get("random_default", False) and "seed" not in values:
+            values["seed"] = spec["minimum"] + secrets.randbelow(
+                spec["maximum"] - spec["minimum"] + 1,
+            )
+
     def build(self, values: dict[str, Any],
               references: list[dict[str, str]] | None = None) -> dict[str, Any]:
+        if self.parameters.get("seed", {}).get("random_default", False) and "seed" not in values:
+            raise WorkflowError("missing resolved seed")
         graph = copy.deepcopy(self.graph)
         if self.modes is not None:
             try:
@@ -243,8 +256,9 @@ class Workflow:
             if (not isinstance(name, str) or not name or not isinstance(spec, dict)
                     or spec.keys() - PARAMETER_KEYS or spec.get("type") not in TYPES):
                 raise WorkflowError("invalid parameter definition")
-            if any(type(spec.get(k, False)) is not bool for k in ("required", "private")):
-                raise WorkflowError("required/private must be booleans")
+            if any(type(spec.get(k, False)) is not bool
+                   for k in ("required", "private", "random_default")):
+                raise WorkflowError("required/private/random_default must be booleans")
             for key in ("minimum", "maximum", "minLength", "maxLength"):
                 if key in spec and (type(spec[key]) not in (int, float)
                                     or not math.isfinite(spec[key])):
@@ -273,7 +287,16 @@ class Workflow:
                 _check_value(spec, spec["default"])
                 if spec.get("private"):
                     raise WorkflowError("private parameters must be required, without defaults")
-            if not spec.get("required", False) and "default" not in spec:
+            if spec.get("random_default", False) and (
+                name != "seed" or spec["type"] != "integer" or "default" in spec
+                or spec.get("required", False) or spec.get("private", False)
+                or type(spec.get("minimum")) is not int or type(spec.get("maximum")) is not int
+                or not 0 <= spec["minimum"] <= spec["maximum"] <= MAX_SEED
+                or "enum" in spec or "multipleOf" in spec
+            ):
+                raise WorkflowError("random_default requires an optional public bounded seed")
+            if (not spec.get("required", False) and "default" not in spec
+                    and not spec.get("random_default", False)):
                 raise WorkflowError("optional parameters need a default")
             target = spec.get("target")
             if (not isinstance(target, dict) or not isinstance(target.get("node"), str)

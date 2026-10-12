@@ -180,6 +180,10 @@ class MediaJobs:
                          for j in self.jobs.values() if j.task is not None and not j.task.done())
             if active + len(items) > self.config.max_queued_images:
                 raise JobError("queue_full", "MCP image capacity is exhausted")
+            # Fingerprint the request before resolving defaults, so an omitted seed
+            # attaches to the same job on retries without drawing another seed.
+            for parameters in values:
+                workflow.resolve_seed(parameters)
             public = [{name: value for name, value in parameters.items()
                        if not workflow.parameters[name].get("private")} for parameters in values]
             if batch:

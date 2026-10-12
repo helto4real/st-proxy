@@ -41,7 +41,7 @@ def test_shipped_upscale_contract_preserves_the_export():
     workflow = WorkflowCatalog(str(ROOT), 100000).get('image_upscale')
     assert workflow.normalize({}) == {'max_side': 3200}
     description = workflow.describe()
-    assert set(description['parameters']['properties']) == {'max_side'}
+    assert set(description['parameters']['properties']) == {'max_side', 'seed'}
     assert description['parameters']['properties']['max_side']['maximum'] == 4096
     assert description['references']['minItems'] == description['references']['maxItems'] == 1
     assert 'without references' not in description['references']['description']
@@ -53,7 +53,9 @@ def test_shipped_upscale_contract_preserves_the_export():
     expected['mcp_reference_1'] = copy.deepcopy(original['6'])
     expected['mcp_reference_1']['inputs'].update(reference)
     expected['2']['inputs']['reference_only'] = True
-    assert workflow.build(workflow.normalize({'max_side': 4096}), [reference]) == expected
+    assert workflow.build(workflow.normalize({
+        'max_side': 4096, 'seed': original['1']['inputs']['seed'],
+    }), [reference]) == expected
     assert workflow.graph == original
     assert WorkflowCatalog(str(ROOT), 100000).get('qwen_scene').describe()['references'][
         'minItems'] == 0
@@ -82,10 +84,10 @@ def test_build_requires_input_and_optional_workflows_still_accept_none(tmp_path)
     _, manifest = write_upscale(tmp_path)
     workflow = Workflow.load(manifest, tmp_path, 100000)
     with pytest.raises(WorkflowError, match='at least 1'):
-        workflow.build(workflow.normalize({}))
+        workflow.build(workflow.normalize({'seed': 0}))
     del manifest['references']['minItems']
     optional = Workflow.load(manifest, tmp_path, 100000)
-    assert 'image 1' not in optional.build(optional.normalize({}))['1']['inputs']
+    assert 'image 1' not in optional.build(optional.normalize({'seed': 0}))['1']['inputs']
 
 
 class UpscaleMCPTests(unittest.IsolatedAsyncioTestCase):
@@ -132,11 +134,13 @@ class UpscaleMCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(response.is_error, response)
             result = response.structured_content
             self.assertEqual(result['status'], 'succeeded')
-            self.assertEqual(result['parameters'], {'max_side': 3200})
+            self.assertEqual(result['parameters']['max_side'], 3200)
+            self.assertIsInstance(result['parameters']['seed'], int)
             self.assertNotIn('SYNTHETIC_STORED_PROMPT', json.dumps(result))
             self.assertEqual(Path(result['images'][0]['path']).read_bytes(), jobs_fixture.PNG)
             sent = self.comfy.submissions[0]['prompt']
             expected = copy.deepcopy(self.graph)
+            expected['1']['inputs']['seed'] = result['parameters']['seed']
             expected['2']['inputs']['reference_only'] = True
             node = sent['1']['inputs']['image 1'][0]
             expected['1']['inputs']['image 1'] = [node, 0]
@@ -154,7 +158,8 @@ class UpscaleMCPTests(unittest.IsolatedAsyncioTestCase):
                 **request, 'job_id': 'upscale-maximum', 'parameters': {'max_side': 4096},
             })
             self.assertFalse(maximum.is_error, maximum)
-            self.assertEqual(maximum.structured_content['parameters'], {'max_side': 4096})
+            self.assertEqual(maximum.structured_content['parameters']['max_side'], 4096)
+            expected['1']['inputs']['seed'] = maximum.structured_content['parameters']['seed']
             expected['1']['inputs']['max side'] = 4096
             self.assertEqual(self.comfy.submissions[1]['prompt'], expected)
             self.comfy.fail_next_job = True
@@ -170,9 +175,13 @@ class UpscaleMCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(batch.structured_content['status'], 'partial')
             self.assertEqual([i['status'] for i in batch.structured_content['items']],
                              ['failed', 'succeeded'])
-            for submission, size in zip(self.comfy.submissions[2:], (2560, 4096), strict=True):
+            for submission, size, item in zip(
+                self.comfy.submissions[2:], (2560, 4096), batch.structured_content['items'],
+                strict=True,
+            ):
                 sent = submission['prompt']
                 self.assertEqual(sent['1']['inputs']['max side'], size)
+                self.assertEqual(sent['1']['inputs']['seed'], item['parameters']['seed'])
                 self.assertEqual(sent['1']['inputs']['positive_prompt'],
                                  self.graph['1']['inputs']['positive_prompt'])
                 self.assertEqual(sent[sent['1']['inputs']['image 1'][0]]['inputs']['filename'],

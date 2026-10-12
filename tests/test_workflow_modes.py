@@ -40,21 +40,22 @@ def write_modes(directory):
 def test_shipped_modes_apply_current_profiles_without_changing_exports(workflow_id):
     workflow = WorkflowCatalog(str(ROOT), 100000).get(workflow_id)
     original = copy.deepcopy(workflow.graph)
+    parameters = {"prompt": "test", "seed": original["1"]["inputs"]["seed"]}
     assert workflow.normalize({"prompt": "test"}) == workflow.normalize({
         "prompt": "test", "mode": "standard",
     })
     expected = copy.deepcopy(original)
     expected["1"]["inputs"]["positive_prompt"] = "test"
     expected["3"]["inputs"]["reference_only"] = True
-    assert workflow.build(workflow.normalize({"prompt": "test", "mode": "quick draft"})) == expected
+    assert workflow.build(workflow.normalize({**parameters, "mode": "quick draft"})) == expected
     del expected["1"]["inputs"]["sigmas"]
     expected["1"]["inputs"].update({
         "steps": 40, "cfg": 2.5, "sampler": "er_sde", "scheduler": "beta",
         "use_zero_negative_conditioning": False,
         "diffusion_model": "diffusion_models/qwen-image2.1/qwen_image_2.1_int8_convrot.safetensors",
     })
-    assert workflow.build(workflow.normalize({"prompt": "test"})) == expected
-    assert workflow.build(workflow.normalize({"prompt": "test", "mode": "standard"})) == expected
+    assert workflow.build(workflow.normalize(parameters)) == expected
+    assert workflow.build(workflow.normalize({**parameters, "mode": "standard"})) == expected
     assert workflow.graph == original
     assert original == json.loads((ROOT / workflow.manifest["workflow"]).read_text())
     spec = workflow.describe()["parameters"]["properties"]["mode"]

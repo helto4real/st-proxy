@@ -33,7 +33,8 @@ def test_shipped_nsfw_only_changes_selected_lora_activation(workflow_id, mode):
     original = copy.deepcopy(workflow.graph)
     references = ([{"root": "/synthetic", "subfolder": "references", "filename": "ref.png"}]
                   if workflow.references else [])
-    parameters = {"prompt": "synthetic test", "mode": mode}
+    parameters = {"prompt": "synthetic test", "mode": mode,
+                  "seed": original["1"]["inputs"]["seed"]}
     off = workflow.build(workflow.normalize(parameters), references)
     assert workflow.normalize(parameters) == workflow.normalize({**parameters, "nsfw": False})
     assert off["11"]["inputs"]["lora_2"] == {

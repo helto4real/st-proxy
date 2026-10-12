@@ -1,9 +1,17 @@
 {
   "id": "image_upscale",
   "name": "Qwen Image 2.1 Upscale",
-  "description": "Upscale one registered image with the stored Qwen enhancement prompt. Preserve its aspect ratio; choose only max_side. Exactly one reference image is required.",
+  "description": "Upscale one registered image with the stored Qwen enhancement prompt. Preserve its aspect ratio; choose max_side and optional seed. Exactly one reference image is required.",
   "workflow": "image_upscale.json",
   "parameters": {
+    "seed": {
+      "type": "integer",
+      "description": "Omit for a random seed per image, or set a fixed seed. The resolved seed is returned in result parameters; retries keep it.",
+      "random_default": true,
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "target": {"node": "1", "input": "seed"}
+    },
     "max_side": {
       "type": "integer",
       "description": "Maximum longest output edge in pixels; must be a multiple of 32.",
