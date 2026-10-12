@@ -232,9 +232,14 @@ registry as before.
 ## Explicit NSFW LoRAs
 
 `image_generation` and `qwen_scene` expose `nsfw`, a boolean defaulting to `false`,
-independent of `mode`. Set it to `true` only when the user explicitly requests
-NSFW for the current image or batch. Never infer it from prompts, reference
-images or earlier jobs. This toggles the configured LoRAs; it does not rewrite
+independent of `mode`. This is an opt-in LoRA switch, not a content label. Set it to
+`true` only when the user explicitly requests enabling the NSFW mode, flag or LoRA
+for the current image or batch, such as "enable NSFW mode" or "nsfw=true".
+"Make an NSFW image" and requests for nude, erotic or explicit content do not
+authorize the switch. Never infer activation from prompts, prompt guidance,
+reference images, earlier jobs or another batch item's flag. Without a clear
+activation request, omit the flag or set it to `false` and proceed with the image.
+This toggles the configured LoRAs; it does not rewrite
 the prompt or classify the generated image's content. The server enforces the
 boolean/default contract; the agent must follow the user's activation instruction.
 

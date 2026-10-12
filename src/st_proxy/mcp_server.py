@@ -67,9 +67,13 @@ class McpListener:
             "For image_upscale, register exactly one image and pass optional max_side and seed. "
             "For workflows with random seed defaults, omit seed for a fresh seed per image "
             "or provide an integer for a fixed seed. Results contain the resolved seed. "
-            "Set parameters.nsfw=true only if exposed and explicitly requested by the user "
-            "for this image or batch. Never infer it from prompts, references or earlier jobs. "
-            "Omitting nsfw leaves it false; it is independent of draft/standard mode. "
+            "The nsfw flag is an opt-in LoRA switch, not a content label. Set parameters.nsfw=true "
+            "only if exposed and the user explicitly requests enabling the NSFW mode, flag or LoRA "
+            "for this image or batch, e.g. 'enable NSFW mode' or 'nsfw=true'. "
+            "Requests for NSFW, nude, erotic or explicit content, including 'make an NSFW image', "
+            "do not authorize this switch. Never infer activation from prompts, prompt guidance, "
+            "references or earlier jobs. Without a clear activation request, omit nsfw or set "
+            "false and proceed with the requested image. It is independent of draft/standard mode. "
             "When multiple images are needed, prefer "
             "generate_batch: it is the most efficient way to avoid repeated GPU switching and "
             "slow LLM reloads. Prepare all items before calling it. "
@@ -104,7 +108,10 @@ class McpListener:
             """Get parameters, available modes, reference limits and optional prompt_guidance.
 
             No GPU acquisition. Select parameters.mode from its enum when available.
-            Set parameters.nsfw=true only for an explicit user request for this image or batch.
+            nsfw is an opt-in LoRA switch, not a content label. Set true only when the user
+            explicitly requests enabling the NSFW mode, flag or LoRA for this image or batch.
+            NSFW content requests or prompt guidance do not authorize it;
+            otherwise omit nsfw or set false.
             Write parameters.prompt only if exposed, applying any prompt guidance.
             Workflows without a prompt parameter use their stored prompt.
             """
@@ -143,7 +150,12 @@ class McpListener:
             References are registered image IDs; required counts come from describe_workflow.
             image_upscale requires one reference, no prompt, and optional max_side and seed.
             Choose parameters.mode from describe_workflow, or omit it for the configured default.
-            If exposed, nsfw defaults to false; set true only when the user explicitly requests it.
+            If exposed, nsfw is an opt-in LoRA switch, default false, not a content label.
+            Set true only when the user explicitly requests enabling the NSFW mode, flag or LoRA
+            for this image (e.g. 'enable NSFW mode' or 'nsfw=true'). 'Make an NSFW image' or a
+            request for nude, erotic or explicit content does not authorize it. Never infer
+            activation from prompts, prompt guidance, references or earlier jobs.
+            Without a clear activation request, omit nsfw or set false and proceed with the image.
             Omit seed for a random default where described, or supply a fixed integer.
             The resolved seed is returned in parameters and retained on job-ID retries.
             Reuse job_id to recover a lost response.
@@ -171,9 +183,13 @@ class McpListener:
             use that original image, not another item in this batch.
             Each item may select its own mode from describe_workflow via parameters.mode
             (or mode directly in a flat item); omitting it uses the configured default.
-            Each item also has its own nsfw flag when exposed, default false. Set true only
-            when the user explicitly requests NSFW for that image or this batch; never infer
-            it from content or earlier jobs. It is independent of parameters.mode.
+            Each item has its own nsfw flag when exposed: an opt-in LoRA switch, default false,
+            not a content label. Set true only when the user explicitly requests enabling the
+            NSFW mode, flag or LoRA for that image or this batch (e.g. 'enable NSFW mode' or
+            'nsfw=true'). 'Make NSFW images' or requests for nude, erotic or explicit content
+            do not authorize it. Never infer activation from prompts, prompt guidance, references,
+            earlier jobs or another item's flag. Without a clear activation request for an item,
+            omit nsfw or set false and proceed with it. It is independent of parameters.mode.
             Items run consecutively in FIFO order, within the configured image queue limit
             (32 by default). All parameters are validated before anything is queued.
             Results have zero-based item indices, individual status and saved image paths;

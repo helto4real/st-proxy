@@ -96,9 +96,14 @@ class Workflow:
         if self.nsfw_loras is not None:
             parameters["nsfw"] = {
                 "type": "boolean", "default": False,
-                "description": "Enable the configured NSFW LoRAs only when the user explicitly "
-                               "requests NSFW for this image or batch. Never infer this from "
-                               "the prompt, references or earlier jobs. Independent of mode.",
+                "description": "Opt-in LoRA switch, not a content label. Set true only when the "
+                               "user explicitly requests enabling the NSFW mode, flag or LoRA "
+                               "for this image or batch (e.g. 'enable NSFW mode' or 'nsfw=true'). "
+                               "'Make an NSFW image' or requests for nude, erotic or explicit "
+                               "content do not authorize it. Never infer activation from prompts, "
+                               "prompt guidance, references, earlier jobs or another item's flag. "
+                               "Without a clear activation request, omit or set false and proceed "
+                               "with the image. Independent of mode.",
             }
         return parameters
 
